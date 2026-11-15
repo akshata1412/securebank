@@ -143,10 +143,18 @@ bash infra/demo.sh outage       # disaster: Sydney goes dark, Route 53 fails ove
 bash infra/demo.sh recover-site # servers come back, DNS returns to the load balancer, RTO is measured
 ```
 
-**Measured in the region-failure drill (15 Nov 2026):** both Sydney servers stopped → Route 53 sent traffic to the
-Mumbai standby in **41 s**; logging in there showed akshata's balance as **Rs 31,587**, the same as Sydney, including
-a transfer made 20 s before the outage (no data lost). Sydney was back in service **66 s** after recovery started.
-Replication is one way (Sydney → Mumbai), so transfers made in Mumbai during an outage are not copied back.
+**Measured in the region-failure drill on the three-tier stack (15 Nov 2026):**
+
+| Step | Result |
+|---|---|
+| Replication lag Sydney → Mumbai | a new transfer was already in Mumbai on the first check (under 1 s, 0 s behind) |
+| Both Sydney web servers stopped → Route 53 sends customers to Mumbai | **39 s** |
+| Balance seen in Mumbai | Rs 29,524, identical to Sydney (no data lost) |
+| Watcher promotes the Mumbai replica (Sydney down 60 s) | automatic; a Rs 250 transfer then succeeded in Mumbai |
+| Sydney back, Route 53 returns customers | **69 s** after recovery started |
+
+Replication is one way (Sydney → Mumbai), so transfers made in Mumbai during an outage are not copied back; after
+failback the Mumbai replica is re-seeded from Sydney (`11-mumbai-standby.sh replica`).
 
 The app's **`/dr`** page (Disaster recovery room) compares RDS with the DR bucket on every refresh, shows the
 recovery point (replication lag) and the recovery time measured in the last drill, and lists every drill event.
@@ -156,9 +164,14 @@ the database, backups and CloudTrail, all read live from AWS.
 
 **Second region (Mumbai standby)**
 ```bash
-# In the second account: launch an EC2 (Amazon Linux 2023, t2.micro) with infra/07-mumbai-standby-userdata.sh
-# as user data (fill in the Sydney load balancer DNS and ~/.sb_repl_token) and an instance role with S3 access. Then, in the Sydney account's CloudShell:
-bash infra/08-route53-mumbai.sh <mumbai-public-dns>   # make Mumbai the Route 53 failover target
+# Sydney CloudShell
+bash infra/10-replication-source.sh binlog                 # binary logs + TLS-only replication user
+bash infra/10-replication-source.sh relay <mumbai-ip>      # relay on the NAT instance, open only to Mumbai
+# Mumbai standby (Systems Manager Run Command, second account)
+bash 11-mumbai-standby.sh replica <relay-ip> <repl-password>   # MySQL 8.4 replica, read-only
+bash 11-mumbai-standby.sh stack <sydney-alb-dns>               # ALBs, 2 servers, microservices, promotion watcher
+# Sydney CloudShell
+bash infra/12-route53-three-level.sh                        # Sydney → Mumbai → S3 static page
 ```
 
 **Turn the AWS demo on/off (CloudShell)**

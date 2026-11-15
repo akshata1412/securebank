@@ -100,6 +100,22 @@ kubectl create secret generic securebank-db --from-literal=DB_PASSWORD=... --fro
 kubectl apply -f k8s/securebank.yaml
 ```
 
+**Deploy the latest image (CloudShell)**
+```bash
+bash infra/deploy.sh        # pulls ghcr.io/akshata1412/securebank:latest onto both EC2 servers and k3s
+```
+
+**Live failure demos (CloudShell)**
+```bash
+bash infra/demo.sh lb       # stop web-1: the load balancer keeps the app up through web-2
+bash infra/demo.sh restore  # start web-1 again
+bash infra/demo.sh pod      # delete a Kubernetes pod: it is recreated automatically
+bash infra/demo.sh dr       # make a transfer: watch its backup replicate to the DR bucket
+```
+
+The app's **`/infra`** page shows, live, which server or pod served the request, load balancer target health,
+RDS status, the latest S3 backup and its DR replication, the Route 53 health check, and CloudTrail status.
+
 **Turn the AWS demo on/off (CloudShell)**
 ```bash
 bash infra/sbctl.sh start   # or: stop | status

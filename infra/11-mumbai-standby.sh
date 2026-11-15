@@ -40,9 +40,11 @@ replica)
   docker network create sb >/dev/null 2>&1 || true
   echo "== MySQL 8.4 replica (small memory settings for a 1 GB server) =="
   docker rm -f replica >/dev/null 2>&1 || true; docker volume rm replicadata >/dev/null 2>&1 || true
+  # replicate-do-db: copy only SecureBank data, not RDS's own mysql.rds_* housekeeping tables
   docker run -d --name replica --restart always --network sb -p 3306:3306 -v replicadata:/var/lib/mysql \
     -e MYSQL_ROOT_PASSWORD="$ROOTPW" mysql:8.4 --server-id=2 --relay-log=relay-bin --skip-replica-start=OFF \
-    --innodb-buffer-pool-size=64M --performance-schema=OFF --max-connections=60 --log-replica-updates=ON >/dev/null
+    --innodb-buffer-pool-size=64M --performance-schema=OFF --max-connections=60 --log-replica-updates=ON \
+    --replicate-do-db=securebank >/dev/null
   for i in $(seq 1 60); do q "SELECT 1" >/dev/null && break; sleep 3; done
   echo "== Note the source position, then copy the data over the encrypted link =="
   M="docker run --rm --network host mysql:8.4"

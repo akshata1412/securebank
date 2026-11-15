@@ -137,6 +137,8 @@ recover-site)
   event ok "Service restored: both servers healthy and Route 53 back on the load balancer" $RTO
   rm -f ~/.sb_outage_start
   echo; echo "Recovery time (RTO): $RTO s from starting recovery. Total time customers were on the backup site: $DOWN s."
-  echo "Customer data lost: none (check the /dr page)." ;;
+  echo "Data lost at failover: none (Mumbai's replica was seconds behind Sydney)."
+  echo "Note: transfers made in Mumbai during the outage are not copied back. Re-seed the Mumbai replica from Sydney:"
+  echo "  (Mumbai standby) source /root/sb-mumbai.env; bash /root/11.sh replica \$RELAY \$RPW" ;;
 *) sed -n 2,10p "$0" ;;
 esac

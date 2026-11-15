@@ -70,7 +70,8 @@ stack)
   VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
   MYAZ=$(md placement/availability-zone)
   SUBA=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC Name=availability-zone,Values=$MYAZ --query 'Subnets[0].SubnetId' --output text)
-  SUBB=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC --query "Subnets[?AvailabilityZone!='$MYAZ']|[0].SubnetId" --output text)
+  OTHERAZ=ap-south-1a; [ "$MYAZ" = ap-south-1a ] && OTHERAZ=ap-south-1b   # t2.micro is not offered in ap-south-1c
+  SUBB=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC Name=availability-zone,Values=$OTHERAZ --query 'Subnets[0].SubnetId' --output text)
   echo "== Firewall per tier (security groups) =="
   sg(){ local id; id=$(aws ec2 describe-security-groups --filters Name=group-name,Values=$1 Name=vpc-id,Values=$VPC --query 'SecurityGroups[0].GroupId' --output text)
         [ "$id" = None ] && id=$(aws ec2 create-security-group --group-name $1 --description "$2" --vpc-id $VPC --query GroupId --output text); echo $id; }

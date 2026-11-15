@@ -25,7 +25,7 @@ aws route53 delete-health-check --health-check-id $OLDHC && echo "replaced healt
 
 echo "== 3. Service status page on the S3 failover site =="
 aws s3 cp s3://$SITE/index.html s3://$SITE/about.html --only-show-errors 2>/dev/null || true
-aws s3 cp ~/sbrepo/site/index.html s3://$SITE/index.html --content-type text/html --only-show-errors
+aws s3 cp ~/sbrepo/statuspage/index.html s3://$SITE/index.html --content-type text/html --only-show-errors
 echo "status page: http://$SITE.s3-website-ap-southeast-2.amazonaws.com"
 
 echo '{"time":"'$(date -u +%Y-%m-%dT%H:%M:%S+00:00)'","level":"info","text":"DR setup: vault backfilled, 10-second Route 53 health check, status page published"}' | \

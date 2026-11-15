@@ -11,6 +11,8 @@ Run inside the app container:
     python recovery.py simulate-loss --yes
     python recovery.py backfill
     python recovery.py event <info|alert|ok> "text" [seconds]
+    python recovery.py export-customers   # primary: snapshot customer balances to S3
+    python recovery.py sync               # standby: build/refresh the database from the DR bucket
 """
 import os
 import sys
@@ -27,6 +29,7 @@ S3_BUCKET = os.environ.get('S3_BUCKET', 'securebank-backups-akshata-2026')
 DR_BUCKET = os.environ.get('DR_BUCKET', 'securebank-dr-backup-akshata-2026')
 TXN_PREFIX = 'transactions/'
 EVENT_PREFIX = 'dr-events/'
+CUSTOMERS_KEY = 'customers/latest.json'
 
 _s3 = boto3.client('s3', region_name=AWS_REGION,
                    config=Config(connect_timeout=2, read_timeout=4, retries={'max_attempts': 2}))
@@ -72,12 +75,14 @@ def db_ids(db_connect):
         conn.close()
 
 
-def log_event(level, text, seconds=None):
+def log_event(level, text, seconds=None, kind=None):
     """Append an event to the DR timeline (stored in S3, so it survives a database failure)."""
     now = datetime.now(timezone.utc)
     event = {'time': now.isoformat(), 'level': level, 'text': text}
     if seconds is not None:
         event['seconds'] = round(float(seconds), 1)
+    if kind:
+        event['kind'] = kind
     key = f"{EVENT_PREFIX}{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.json"
     _s3.put_object(Bucket=S3_BUCKET, Key=key, Body=json.dumps(event), ContentType='application/json')
     return event
@@ -96,19 +101,23 @@ def events(limit=12):
     return out
 
 
-def recovery_point():
-    """Seconds between the newest backup landing in S3 and its copy landing in the DR bucket."""
+def recovery_point(evts):
+    """How far the DR vault trails a new transfer.
+
+    S3 gives a replica the same timestamp as the original, so the lag can't be read from object dates.
+    While the newest backup is still copying we show how long it has waited; otherwise we show the
+    lag measured by the last replication drill (an event with kind 'rpo').
+    """
     live = _list(S3_BUCKET, TXN_PREFIX + 'live/')
-    if not live:
-        return None
-    newest = max(live, key=lambda o: o['LastModified'])
-    try:
-        copy = _s3.head_object(Bucket=DR_BUCKET, Key=newest['Key'])
-        return {'seconds': (copy['LastModified'] - newest['LastModified']).total_seconds(), 'pending': False,
-                'at': newest['LastModified']}
-    except Exception:
-        waited = (datetime.now(timezone.utc) - newest['LastModified']).total_seconds()
-        return {'seconds': waited, 'pending': True, 'at': newest['LastModified']}
+    if live:
+        newest = max(live, key=lambda o: o['LastModified'])
+        try:
+            _s3.head_object(Bucket=DR_BUCKET, Key=newest['Key'])
+        except Exception:
+            waited = (datetime.now(timezone.utc) - newest['LastModified']).total_seconds()
+            return {'seconds': waited, 'pending': True}
+    measured = next((e for e in evts if e.get('kind') == 'rpo' and e.get('seconds') is not None), None)
+    return {'seconds': measured['seconds'], 'pending': False, 'at': measured['time']} if measured else None
 
 
 def status(db_connect):
@@ -126,14 +135,14 @@ def status(db_connect):
     report['missing'] = sorted(set(dr) - ids) if report['db_ok'] else []
     report['not_in_dr'] = sorted(ids - set(dr)) if report['dr_ok'] else []
     try:
-        report['rpo'] = recovery_point()
-    except Exception:
-        report['rpo'] = None
-    try:
         report['events'] = events()
     except Exception:
         report['events'] = []
-    report['rto'] = next((e for e in report['events'] if e.get('seconds') is not None), None)
+    try:
+        report['rpo'] = recovery_point(report['events'])
+    except Exception:
+        report['rpo'] = None
+    report['rto'] = next((e for e in report['events'] if e.get('seconds') is not None and e.get('kind') != 'rpo'), None)
     if not report['db_ok']:
         report['state'] = 'down'
     elif report['missing']:
@@ -143,7 +152,7 @@ def status(db_connect):
     return report
 
 
-def restore(db_connect):
+def restore(db_connect, log=True):
     """Insert every transaction that exists in the DR bucket but not in the database."""
     t0 = time.time()
     dr = dr_records()
@@ -166,7 +175,7 @@ def restore(db_connect):
     finally:
         conn.close()
     took = time.time() - t0
-    if missing:
+    if missing and log:
         log_event('ok', f"Ledger rebuilt from the DR bucket: {len(missing)} transactions restored", took)
     return len(missing), took
 
@@ -193,6 +202,53 @@ def backfill():
     return copied
 
 
+SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS users (
+         username VARCHAR(50) PRIMARY KEY, password VARCHAR(100) NOT NULL, name VARCHAR(100) NOT NULL,
+         account VARCHAR(20) NOT NULL, balance INT NOT NULL DEFAULT 0,
+         created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP)""",
+    """CREATE TABLE IF NOT EXISTS transactions (
+         id VARCHAR(20) PRIMARY KEY, from_user VARCHAR(50) NOT NULL, to_user VARCHAR(50) NOT NULL,
+         from_account VARCHAR(20) NOT NULL, to_account VARCHAR(20) NOT NULL, amount INT NOT NULL,
+         note VARCHAR(200), timestamp TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP, backed_up TINYINT(1) DEFAULT 0,
+         FOREIGN KEY (from_user) REFERENCES users(username), FOREIGN KEY (to_user) REFERENCES users(username))""",
+]
+
+
+def export_customers(db_connect):
+    """Primary site: snapshot every customer's balance to S3 (replicated/pulled with the transactions)."""
+    conn = db_connect()
+    try:
+        with conn.cursor() as c:
+            c.execute("SELECT username, password, name, account, balance FROM users")
+            rows = c.fetchall()
+    finally:
+        conn.close()
+    body = {'exported_at': datetime.now(timezone.utc).isoformat(), 'customers': rows}
+    _s3.put_object(Bucket=S3_BUCKET, Key=CUSTOMERS_KEY, Body=json.dumps(body, default=str),
+                   ContentType='application/json')
+    return len(rows)
+
+
+def sync(db_connect):
+    """Standby site: create the tables if needed, load customer balances, then add missing transactions."""
+    conn = db_connect()
+    try:
+        with conn.cursor() as c:
+            for ddl in SCHEMA:
+                c.execute(ddl)
+            snap = json.loads(_s3.get_object(Bucket=DR_BUCKET, Key=CUSTOMERS_KEY)['Body'].read())
+            for u in snap['customers']:
+                c.execute("""INSERT INTO users (username, password, name, account, balance) VALUES (%s, %s, %s, %s, %s)
+                             ON DUPLICATE KEY UPDATE password=VALUES(password), name=VALUES(name),
+                             account=VALUES(account), balance=VALUES(balance)""",
+                          (u['username'], u['password'], u['name'], u['account'], int(u['balance'])))
+    finally:
+        conn.close()
+    n, took = restore(db_connect, log=False)
+    return len(snap['customers']), n, snap['exported_at']
+
+
 def _main(argv):
     import app  # the app module holds the database connection settings
     cmd = argv[1] if len(argv) > 1 else 'status'
@@ -209,6 +265,11 @@ def _main(argv):
         print(f"deleted {simulate_loss(app.db)} transactions from RDS")
     elif cmd == 'backfill':
         print(f"copied {backfill()} older backups into the DR bucket")
+    elif cmd == 'export-customers':
+        print(f"exported {export_customers(app.db)} customers to s3://{S3_BUCKET}/{CUSTOMERS_KEY}")
+    elif cmd == 'sync':
+        customers, added, at = sync(app.db)
+        print(f"standby synced: {customers} customers (snapshot {at}), {added} new transactions")
     elif cmd == 'event':
         print(log_event(argv[2], argv[3], float(argv[4]) if len(argv) > 4 else None))
     else:

@@ -13,10 +13,11 @@ Users log in, check their balance, transfer money and view their history. Data l
 ```
                        Route 53  (securebank-akshata.com, health check on /health)
                        app.securebank-akshata.com
-                         │ PRIMARY                      │ SECONDARY (failover)
+                         │ PRIMARY (Sydney)             │ SECONDARY (failover, Mumbai)
                          ▼                              ▼
-              Application Load Balancer        S3 static website
-                 (securebank-alb)              (securebank-site-akshata-2026)
+              Application Load Balancer        Warm standby EC2, ap-south-1
+                 (securebank-alb)              (second AWS account: SecureBank +
+                                                MariaDB, refreshed every 30 s)
                   │              │
    ┌──────────────┼──────────────┼─────────────── securebank-vpc 10.0.0.0/16 ──┐
    │  public-a (2a)│   public-b (2b)│                                            │
@@ -30,14 +31,20 @@ Users log in, check their balance, transfer money and view their history. Data l
            RDS MySQL (securebank-db) ──► automated backups + snapshots
                    │
      app writes each transaction ──► S3 securebank-backups (versioned, SSE)
-                                         └─ replication ─► S3 securebank-dr-backup
+                                         ├─ replication ─► S3 securebank-dr-backup (Sydney)
+                                         └─ pulled every 30 s ─► S3 securebank-dr-mumbai (Mumbai)
+                                                                  └─► standby database in Mumbai
 
   Security & ops: IAM roles + least-privilege users + MFA · CloudTrail (KMS-encrypted logs)
                   CloudWatch alarm + dashboard · SNS email alerts · AWS Budgets
   DevOps:         GitHub Actions → lint + tests + Docker build → image to GHCR
 ```
 
-> **Note on regions:** the AWS account's free plan only allows Sydney, so disaster recovery uses S3 replication between two buckets and RDS backups in the same region instead of a second region.
+> **Two regions:** the main AWS account's free plan only allows Sydney, so the second region runs in a
+> second AWS account in Mumbai (ap-south-1). A bucket policy on the Sydney backup bucket lets the Mumbai
+> account read it; the Mumbai standby pulls new transactions and customer balances every 30 seconds and
+> rebuilds its own database from them. If the whole Sydney region goes down, Route 53 sends customers to
+> Mumbai, which keeps serving the last copy it pulled.
 
 ---
 
@@ -115,7 +122,7 @@ bash infra/demo.sh pod          # a Kubernetes pod dies: it is recreated automat
 bash infra/demo.sh dr           # a transfer is backed up and replicated to the DR bucket
 bash infra/demo.sh wipe         # disaster: the transaction ledger is wiped from RDS
 bash infra/demo.sh recover      # the ledger is rebuilt from the DR bucket
-bash infra/demo.sh outage       # disaster: both servers die, Route 53 fails over to the S3 status page
+bash infra/demo.sh outage       # disaster: Sydney goes dark, Route 53 fails over to the Mumbai standby
 bash infra/demo.sh recover-site # servers come back, DNS returns to the load balancer, RTO is measured
 ```
 
@@ -124,6 +131,13 @@ recovery point (replication lag) and the recovery time measured in the last dril
 During a full outage it stays reachable through the Kubernetes copy of the app (NodePort 30081).
 The **`/infra`** page shows which server or pod served the request, load balancer and Route 53 health,
 the database, backups and CloudTrail, all read live from AWS.
+
+**Second region (Mumbai standby)**
+```bash
+# In the second account: launch an EC2 (Amazon Linux 2023, t3.micro) with infra/07-mumbai-standby-userdata.sh
+# as user data and an instance role with S3 access. Then, in the Sydney account's CloudShell:
+bash infra/08-route53-mumbai.sh <mumbai-public-dns>   # make Mumbai the Route 53 failover target
+```
 
 **Turn the AWS demo on/off (CloudShell)**
 ```bash

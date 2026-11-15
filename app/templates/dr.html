@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block head %}<meta http-equiv="refresh" content="5">{% endblock %}
 {% block title %}Disaster recovery · SecureBank{% endblock %}
-{% macro dur(s) -%}{% if s is none %}Not measured{% elif s < 90 %}{{ s|round|int }} s{% else %}{{ (s // 60)|int }} min {{ (s % 60)|round|int }} s{% endif %}{%- endmacro %}
+{% macro dur(s) -%}{% if s is none %}Not measured{% elif s < 10 %}{{ '%.1f'|format(s) }} s{% elif s < 90 %}{{ s|round|int }} s{% else %}{{ (s // 60)|int }} min {{ (s % 60)|round|int }} s{% endif %}{%- endmacro %}
 {% block main %}
 <h1>Disaster recovery room</h1>
 {% if r.state == 'safe' %}
@@ -16,7 +16,7 @@
 <div class="figures">
   <div class="figure"><div class="v {{ 'bad' if not r.db_ok or r.missing }}">{{ r.db_count if r.db_ok else 'Down' }}</div><div class="k">Records in the database</div></div>
   <div class="figure"><div class="v">{{ r.dr_count if r.dr_ok else '?' }}</div><div class="k">Copies in the DR vault</div></div>
-  <div class="figure"><div class="v">{% if r.rpo %}{{ dur(r.rpo.seconds) }}{% else %}Not measured{% endif %}</div><div class="k">{% if r.rpo and r.rpo.pending %}Newest backup still copying{% else %}Recovery point: how far the vault trails a new transfer{% endif %}</div></div>
+  <div class="figure"><div class="v">{% if r.rpo %}{{ dur(r.rpo.seconds) }}{% else %}Not measured{% endif %}</div><div class="k">{% if r.rpo and r.rpo.pending %}Newest backup still copying to the vault{% else %}Recovery point: how far the vault trails a new transfer, last measured{% endif %}</div></div>
   <div class="figure"><div class="v">{{ dur(r.rto.seconds) if r.rto else 'Not measured' }}</div><div class="k">Recovery time in the last drill</div></div>
 </div>
 

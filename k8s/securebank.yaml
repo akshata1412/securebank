@@ -1,5 +1,9 @@
-# SecureBank app on Kubernetes (k3s). DB password lives in a Secret created with:
-#   kubectl create secret generic securebank-db --from-literal=DB_PASSWORD=... --from-literal=SECRET_KEY=...
+# SecureBank three-tier app on Kubernetes (k3s).
+#   Tier 1: securebank-web (NodePort 30081), the only Service reachable from outside the cluster
+#   Tier 2: users, accounts, passbook (ClusterIP Services act as internal load balancers)
+#   Tier 3: Amazon RDS (outside the cluster)
+# A NetworkPolicy lets only the web pods call the services, and only the services hold the DB password.
+# Secret: kubectl create secret generic securebank-db --from-literal=DB_PASSWORD=... --from-literal=SECRET_KEY=... --from-literal=INTERNAL_TOKEN=...
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,48 +16,158 @@ data:
   AWS_REGION: ap-southeast-2
   DR_BUCKET: securebank-dr-backup-akshata-2026
   TRAIL_NAME: securebank-audit-trail
+  USERS_URL: http://users:5000
+  ACCOUNTS_URL: http://accounts:5000
+  PASSBOOK_URL: http://passbook:5000
   # TARGET_GROUP_ARN and HEALTH_CHECK_ID are filled in by infra/deploy.sh
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: securebank
-  labels: {app: securebank}
+  name: users
+  labels: {app: securebank, tier: api, svc: users}
 spec:
-  replicas: 3
+  replicas: 2
   selector:
-    matchLabels: {app: securebank}
+    matchLabels: {svc: users}
   template:
     metadata:
-      labels: {app: securebank}
+      labels: {app: securebank, tier: api, svc: users}
     spec:
       containers:
-      - name: securebank
-        image: ghcr.io/akshata1412/securebank:latest
+      - name: users
+        image: ghcr.io/akshata1412/securebank-users:latest
         imagePullPolicy: Always
-        ports:
-        - containerPort: 80
+        ports: [{containerPort: 5000}]
         envFrom:
         - configMapRef: {name: securebank-config}
-        - secretRef: {name: securebank-db}
         env:
-        - name: SERVER_ID
-          valueFrom:
-            fieldRef: {fieldPath: metadata.name}
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef: {fieldPath: spec.nodeName}
+        - {name: DB_PASSWORD, valueFrom: {secretKeyRef: {name: securebank-db, key: DB_PASSWORD}}}
+        - {name: INTERNAL_TOKEN, valueFrom: {secretKeyRef: {name: securebank-db, key: INTERNAL_TOKEN, optional: true}}}
+        - {name: SERVER_ID, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
         resources:
-          requests: {cpu: 50m, memory: 96Mi}
-          limits: {memory: 256Mi}
-        readinessProbe:
-          httpGet: {path: /, port: 80}
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        livenessProbe:
-          httpGet: {path: /, port: 80}
-          initialDelaySeconds: 15
-          periodSeconds: 20
+          requests: {cpu: 25m, memory: 64Mi}
+          limits: {memory: 192Mi}
+        readinessProbe: {httpGet: {path: /health, port: 5000}, initialDelaySeconds: 5, periodSeconds: 10}
+        livenessProbe: {httpGet: {path: /health, port: 5000}, initialDelaySeconds: 20, periodSeconds: 20, failureThreshold: 6}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: users
+spec:
+  type: ClusterIP
+  selector: {svc: users}
+  ports: [{port: 5000, targetPort: 5000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: accounts
+  labels: {app: securebank, tier: api, svc: accounts}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {svc: accounts}
+  template:
+    metadata:
+      labels: {app: securebank, tier: api, svc: accounts}
+    spec:
+      containers:
+      - name: accounts
+        image: ghcr.io/akshata1412/securebank-accounts:latest
+        imagePullPolicy: Always
+        ports: [{containerPort: 5000}]
+        envFrom:
+        - configMapRef: {name: securebank-config}
+        env:
+        - {name: DB_PASSWORD, valueFrom: {secretKeyRef: {name: securebank-db, key: DB_PASSWORD}}}
+        - {name: INTERNAL_TOKEN, valueFrom: {secretKeyRef: {name: securebank-db, key: INTERNAL_TOKEN, optional: true}}}
+        - {name: SERVER_ID, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        resources:
+          requests: {cpu: 25m, memory: 64Mi}
+          limits: {memory: 192Mi}
+        readinessProbe: {httpGet: {path: /health, port: 5000}, initialDelaySeconds: 5, periodSeconds: 10}
+        livenessProbe: {httpGet: {path: /health, port: 5000}, initialDelaySeconds: 20, periodSeconds: 20, failureThreshold: 6}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: accounts
+spec:
+  type: ClusterIP
+  selector: {svc: accounts}
+  ports: [{port: 5000, targetPort: 5000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: passbook
+  labels: {app: securebank, tier: api, svc: passbook}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {svc: passbook}
+  template:
+    metadata:
+      labels: {app: securebank, tier: api, svc: passbook}
+    spec:
+      containers:
+      - name: passbook
+        image: ghcr.io/akshata1412/securebank-passbook:latest
+        imagePullPolicy: Always
+        ports: [{containerPort: 5000}]
+        envFrom:
+        - configMapRef: {name: securebank-config}
+        env:
+        - {name: DB_PASSWORD, valueFrom: {secretKeyRef: {name: securebank-db, key: DB_PASSWORD}}}
+        - {name: INTERNAL_TOKEN, valueFrom: {secretKeyRef: {name: securebank-db, key: INTERNAL_TOKEN, optional: true}}}
+        - {name: SERVER_ID, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        resources:
+          requests: {cpu: 25m, memory: 64Mi}
+          limits: {memory: 192Mi}
+        readinessProbe: {httpGet: {path: /health, port: 5000}, initialDelaySeconds: 5, periodSeconds: 10}
+        livenessProbe: {httpGet: {path: /health, port: 5000}, initialDelaySeconds: 20, periodSeconds: 20, failureThreshold: 6}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: passbook
+spec:
+  type: ClusterIP
+  selector: {svc: passbook}
+  ports: [{port: 5000, targetPort: 5000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: securebank-web
+  labels: {app: securebank, tier: web}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {tier: web}
+  template:
+    metadata:
+      labels: {app: securebank, tier: web}
+    spec:
+      containers:
+      - name: web
+        image: ghcr.io/akshata1412/securebank-web:latest
+        imagePullPolicy: Always
+        ports: [{containerPort: 80}]
+        envFrom:
+        - configMapRef: {name: securebank-config}
+        env:
+        - {name: SECRET_KEY, valueFrom: {secretKeyRef: {name: securebank-db, key: SECRET_KEY}}}
+        - {name: INTERNAL_TOKEN, valueFrom: {secretKeyRef: {name: securebank-db, key: INTERNAL_TOKEN, optional: true}}}
+        - {name: SERVER_ID, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+        resources:
+          requests: {cpu: 25m, memory: 64Mi}
+          limits: {memory: 192Mi}
+        readinessProbe: {httpGet: {path: /health, port: 80}, initialDelaySeconds: 5, periodSeconds: 10}
+        livenessProbe: {httpGet: {path: /health, port: 80}, initialDelaySeconds: 15, periodSeconds: 20}
 ---
 apiVersion: v1
 kind: Service
@@ -61,8 +175,21 @@ metadata:
   name: securebank-service
 spec:
   type: NodePort
-  selector: {app: securebank}
+  selector: {tier: web}
   ports:
   - port: 80
     targetPort: 80
     nodePort: 30081
+---
+# Firewall inside the cluster: API pods accept traffic only from web pods (and probes from the node).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-from-web-only
+spec:
+  podSelector: {matchLabels: {tier: api}}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector: {matchLabels: {tier: web}}
+    ports: [{port: 5000}]

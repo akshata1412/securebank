@@ -1,0 +1,38 @@
+# Run the whole three-tier stack on one machine:  docker compose up --build   then open http://localhost:8080
+# Tier 3 = mysql, tier 2 = users/accounts/passbook (+ an nginx standing in for the internal load balancer),
+# tier 1 = web. Only the services get the database password; only the web container publishes a port.
+services:
+  db:
+    image: mysql:8.4
+    environment: {MYSQL_ROOT_PASSWORD: localdev, MYSQL_DATABASE: securebank}
+    volumes: [./services/schema.sql:/docker-entrypoint-initdb.d/1-schema.sql, ./services/seed.sql:/docker-entrypoint-initdb.d/2-seed.sql]
+    networks: [data]
+    healthcheck: {test: ["CMD", "mysqladmin", "ping", "-plocaldev"], interval: 5s, retries: 20}
+  users: &svc
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: users}}
+    environment: {DB_HOST: db, DB_USER: root, DB_PASSWORD: localdev, INTERNAL_TOKEN: localtoken, SERVER_ID: users-local}
+    networks: [app, data]
+    depends_on: {db: {condition: service_healthy}}
+  accounts:
+    <<: *svc
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: accounts}}
+    environment: {DB_HOST: db, DB_USER: root, DB_PASSWORD: localdev, INTERNAL_TOKEN: localtoken, SERVER_ID: accounts-local}
+  passbook:
+    <<: *svc
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: passbook}}
+    environment: {DB_HOST: db, DB_USER: root, DB_PASSWORD: localdev, INTERNAL_TOKEN: localtoken, SERVER_ID: passbook-local}
+  internal-lb:
+    image: nginx:1.27-alpine
+    volumes: [./services/internal-lb.conf:/etc/nginx/conf.d/default.conf:ro]
+    networks: [app]
+    depends_on: [users, accounts, passbook]
+  web:
+    build: {context: ., dockerfile: web/Dockerfile}
+    environment: {API_URL: "http://internal-lb", INTERNAL_TOKEN: localtoken, SECRET_KEY: localsecret, SERVER_ID: web-local}
+    ports: ["8080:80"]
+    networks: [public, app]
+    depends_on: [internal-lb]
+networks:
+  public: {}
+  app: {internal: true}
+  data: {internal: true}

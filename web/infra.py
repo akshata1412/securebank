@@ -4,7 +4,6 @@ Every check is wrapped so that a missing permission or an unreachable service
 shows up as a red/grey card instead of breaking the page.
 """
 import os
-import time
 import socket
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -70,25 +69,9 @@ def compute():
     return info
 
 
-def database(db_connect):
-    try:
-        t0 = time.time()
-        conn = db_connect()
-        try:
-            with conn.cursor() as c:
-                c.execute("SELECT COUNT(*) AS n FROM users")
-                users = c.fetchone()['n']
-                c.execute("SELECT COUNT(*) AS n, SUM(backed_up) AS b, MAX(timestamp) AS last FROM transactions")
-                row = c.fetchone()
-                c.execute("SELECT VERSION() AS v")
-                version = c.fetchone()['v']
-        finally:
-            conn.close()
-        return {'ok': True, 'latency_ms': int((time.time() - t0) * 1000), 'users': users,
-                'transactions': row['n'], 'backed_up': int(row['b'] or 0), 'last': row['last'],
-                'version': version, 'host': os.environ.get('DB_HOST', '').split('.')[0]}
-    except Exception as e:
-        return {'ok': False, 'error': str(e)[:160]}
+def database(stats):
+    """Database figures come from passbook-management: the web tier has no database access."""
+    return stats()
 
 
 def backups():
@@ -142,7 +125,7 @@ def dns():
         obs = r['HealthCheckObservations']
         healthy = sum(1 for o in obs if o['StatusReport']['Status'].startswith('Success'))
         return {'ok': healthy >= len(obs) / 2, 'healthy': healthy, 'total': len(obs),
-                'record': 'app.securebank-akshata.com', 'routing': 'Failover: ALB primary, S3 secondary'}
+                'record': 'app.securebank-akshata.com', 'routing': 'Failover: Sydney, then Mumbai, then the S3 static page'}
     except Exception as e:
         return {'ok': False, 'error': str(e)[:160]}
 
@@ -160,12 +143,12 @@ def security():
         return {'ok': False, 'error': str(e)[:160]}
 
 
-def snapshot(db_connect):
+def snapshot(stats):
     """Run all checks in parallel so the page stays fast."""
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {
             'compute': pool.submit(compute),
-            'database': pool.submit(database, db_connect),
+            'database': pool.submit(database, stats),
             'backups': pool.submit(backups),
             'lb': pool.submit(load_balancer),
             'dns': pool.submit(dns),

@@ -18,13 +18,18 @@ lb)
   echo; echo "== Stopping securebank-web-1 (simulated server failure) =="
   aws ec2 stop-instances --instance-ids $WEB1 >/dev/null
   echo "== Calling the app through the load balancer every second =="
+  OK=0; FAIL=0
   for i in $(seq 1 40); do
     R=$(curl -s -m 3 -w ' %{http_code}' http://$ALBDNS/health)
     CODE=${R##* }; SRV=$(echo "$R" | grep -o '"server":"[^"]*"' | cut -d'"' -f4)
+    [ "$CODE" = 200 ] && OK=$((OK+1)) || FAIL=$((FAIL+1))
     printf '%2ds  HTTP %s  served by %s\n' $i "$CODE" "${SRV:-none}"; sleep 1
   done
   echo; echo "== After: =="; targets
-  echo "Users never lost the app: web-2 took all the traffic." ;;
+  echo
+  echo "Result: $OK of 40 requests succeeded, $FAIL failed."
+  echo "The few failures happen in the ~10 s the load balancer needs to detect the dead server"
+  echo "(health check every 5 s, 2 misses). After that, web-2 serves 100% of traffic with no manual action." ;;
 restore)
   aws ec2 start-instances --instance-ids $WEB1 >/dev/null; aws ec2 wait instance-running --instance-ids $WEB1
   echo "web-1 started, waiting for the load balancer to mark it healthy..."
@@ -42,7 +47,7 @@ dr)
   rm -f $J
   KEY=$(aws s3api list-objects-v2 --bucket $B --prefix transactions/live/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
   echo "== New transaction backup: $KEY =="
-  aws s3 cp s3://$B/$KEY - | head -12
+  aws s3 cp s3://$B/$KEY - | head -12; echo
   for i in $(seq 1 12); do
     ST=$(aws s3api head-object --bucket $B --key $KEY --query ReplicationStatus --output text 2>/dev/null)
     aws s3api head-object --bucket $DR --key $KEY >/dev/null 2>&1 && IN=yes || IN=no

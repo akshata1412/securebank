@@ -40,9 +40,11 @@ replica)
   docker network create sb >/dev/null 2>&1 || true
   echo "== MySQL 8.4 replica (small memory settings for a 1 GB server) =="
   docker rm -f replica >/dev/null 2>&1 || true; docker volume rm replicadata >/dev/null 2>&1 || true
+  # replicate-do-db: copy only SecureBank data, not RDS's own mysql.rds_* housekeeping tables
   docker run -d --name replica --restart always --network sb -p 3306:3306 -v replicadata:/var/lib/mysql \
     -e MYSQL_ROOT_PASSWORD="$ROOTPW" mysql:8.4 --server-id=2 --relay-log=relay-bin --skip-replica-start=OFF \
-    --innodb-buffer-pool-size=64M --performance-schema=OFF --max-connections=60 --log-replica-updates=ON >/dev/null
+    --innodb-buffer-pool-size=64M --performance-schema=OFF --max-connections=60 --log-replica-updates=ON \
+    --replicate-do-db=securebank >/dev/null
   for i in $(seq 1 60); do q "SELECT 1" >/dev/null && break; sleep 3; done
   echo "== Note the source position, then copy the data over the encrypted link =="
   M="docker run --rm --network host mysql:8.4"
@@ -70,7 +72,8 @@ stack)
   VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
   MYAZ=$(md placement/availability-zone)
   SUBA=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC Name=availability-zone,Values=$MYAZ --query 'Subnets[0].SubnetId' --output text)
-  SUBB=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC --query "Subnets[?AvailabilityZone!='$MYAZ']|[0].SubnetId" --output text)
+  OTHERAZ=ap-south-1a; [ "$MYAZ" = ap-south-1a ] && OTHERAZ=ap-south-1b   # t2.micro is not offered in ap-south-1c
+  SUBB=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC Name=availability-zone,Values=$OTHERAZ --query 'Subnets[0].SubnetId' --output text)
   echo "== Firewall per tier (security groups) =="
   sg(){ local id; id=$(aws ec2 describe-security-groups --filters Name=group-name,Values=$1 Name=vpc-id,Values=$VPC --query 'SecurityGroups[0].GroupId' --output text)
         [ "$id" = None ] && id=$(aws ec2 create-security-group --group-name $1 --description "$2" --vpc-id $VPC --query GroupId --output text); echo $id; }

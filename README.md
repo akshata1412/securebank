@@ -4,48 +4,56 @@
 
 Built for the Cloud Computing course (CB3203B) at Vishwakarma Institute of Technology, Pune.
 
-Users log in, check their balance, transfer money and view their history. Data lives in Amazon RDS (MySQL), every transaction is backed up to S3 and replicated to a DR bucket, and the app runs on two servers in two Availability Zones behind a load balancer, with Route 53 health-checked failover.
+Customers sign in, check their balance, send money and read their passbook. SecureBank is a **three-tier
+architecture**: web apps (tier 1), backend microservices in Docker containers (tier 2) and a private database
+(tier 3). Each tier talks only to the tier below it, every tier has its own firewall, and only the microservices can
+reach the database. The database is replicated to a second Availability Zone and to a second region.
 
 ---
 
-## 🏗️ Architecture (as deployed, region ap-southeast-2 / Sydney)
+## 🏗️ Architecture
 
 ```
-                       Route 53  (securebank-akshata.com, health check on /health)
-                       app.securebank-akshata.com
-                         │ PRIMARY (Sydney)             │ SECONDARY (failover, Mumbai)
-                         ▼                              ▼
-              Application Load Balancer        Warm standby EC2, ap-south-1
-                 (securebank-alb)              (second AWS account: SecureBank +
-                                                MariaDB, refreshed every 15 s)
-                  │              │
-   ┌──────────────┼──────────────┼─────────────── securebank-vpc 10.0.0.0/16 ──┐
-   │  public-a (2a)│   public-b (2b)│                                            │
-   │  EC2 web-1  ◄─┘   EC2 web-2  ◄─┘        k3s cluster: master + 2 workers     │
-   │  Docker: SecureBank  Docker: SecureBank  nginx ×3 (NodePort 30080)          │
-   │                                          SecureBank ×3 (NodePort 30081)     │
-   │  private-a (2a)    private-b (2b)   (reserved for DB / internal tier)       │
-   └───────────────┬──────────────────────────────────────────────────────────┘
-                   │ VPC peering
-                   ▼
-           RDS MySQL (securebank-db) ──► automated backups + snapshots
-                   │
-     app writes each transaction ──► S3 securebank-backups (versioned, SSE)
-                                         └─ replication ─► S3 securebank-dr-backup (Sydney)
-
-  Mumbai standby ── pulls /replication.json every 15 s ──► MariaDB on the standby + S3 securebank-dr-mumbai
-
-  Security & ops: IAM roles + least-privilege users + MFA · CloudTrail (KMS-encrypted logs)
-                  CloudWatch alarm + dashboard · SNS email alerts · AWS Budgets
-  DevOps:         GitHub Actions → lint + tests + Docker build → image to GHCR
+            Mobile app · iPad app · Laptop browser · Desktop · Smartwatch
+                                     │ HTTPS
+                     Route 53  (health-checked DNS, /health/deep)
+             Sydney ──fails──► Mumbai ──fails──► S3 static page "We'll be back soon"
+                     │
+ ┌──── Sydney · ap-southeast-2 (primary) ─────────────────────────┐   ┌── Mumbai · ap-south-1 (standby, 2nd account) ──┐
+ │  AWS WAF ─► Public load balancer                                │   │  Public load balancer                          │
+ │  Tier 1  Web app · AZ a        Web app · AZ b    [web SG]       │   │  Web · AZ a          Web · AZ b                │
+ │              └──► Internal load balancer ◄──┘                  │   │  Internal load balancer                        │
+ │           /users    /accounts    /passbook                      │   │  user · account · passbook                     │
+ │  Tier 2  user-mgmt  account-mgmt passbook-mgmt  ×2 AZ [API SG]  │   │                                                │
+ │  Tier 3  RDS MySQL primary · AZ a ═sync═ standby · AZ b         │──►│  MySQL 8.4 replica (async, TLS)                │
+ │          private data subnets   [DB SG + network ACL]           │   │  promoted when Sydney is down for 60 s         │
+ └─────────────────────────────────────────────────────────────────┘   └────────────────────────────────────────────────┘
 ```
 
-> **Two regions:** the main AWS account only allows Sydney and its organization blocks other accounts from
-> reading its buckets, so the second region runs in a second AWS account in Mumbai (ap-south-1) and
-> replicates at the application level. Every 15 seconds the Mumbai standby pulls a token-protected feed
-> (`/replication.json`: customer balances and transactions) from the Sydney load balancer, rebuilds its own
-> MariaDB database and keeps the last copy in its own S3 bucket. If the whole Sydney region goes down,
-> Route 53 sends customers to Mumbai, which keeps serving the last copy it pulled (recovery point ≤ 15 s).
+**Firewalls**
+
+| Layer | Firewall | Allows |
+|---|---|---|
+| Edge | AWS WAF (managed rules + rate limit) | clean HTTP requests only |
+| Public load balancer | security group | HTTP from the internet |
+| Tier 1 web | security group | port 80 from the public load balancer only |
+| Internal load balancer | security group | port 80 from the web tier only |
+| Tier 2 microservices | security group | ports 5001-5003 from the internal load balancer only |
+| Tier 3 database | **separate** security group + network ACL on the data subnets | port 3306 from the microservices only |
+
+The one documented exception: a replication relay on the NAT instance's Elastic IP forwards MySQL (TLS) to RDS, and
+only the Mumbai standby's IP may connect to it. Secrets (database password, tokens) live in SSM Parameter Store, and
+every EC2 deploy goes through AWS Systems Manager, so no SSH port is open on the web or API tiers.
+
+**Disaster recovery**
+
+| Failure | What takes over |
+|---|---|
+| A web app or microservice container | the load balancer skips it within ~10 s |
+| An Availability Zone | the AZ b copies keep serving; RDS Multi-AZ fails over to its standby |
+| The whole Sydney region | Route 53 sends customers to Mumbai; the replica is promoted to primary |
+| Both regions | Route 53 shows the S3 static page |
+| A bad delete (copied by replication) | S3 transaction backups and nightly RDS snapshots |
 
 ---
 
@@ -83,34 +91,42 @@ Users log in, check their balance, transfer money and view their history. Data l
 ## 📁 Repository layout
 
 ```
-app/            Flask application (config via environment variables)
-tests/          Smoke tests run in CI
-k8s/            Kubernetes manifests (nginx practical + SecureBank deployment)
+web/            Tier 1: Flask web app (pages only, calls the APIs, no database access)
+services/       Tier 2: users, accounts, passbook microservices + shared code, one Docker image each
+docker-compose.yml  The whole three-tier stack on one machine
+k8s/            Kubernetes: web + 3 microservices + NetworkPolicy
+infra/          AWS CLI scripts (run in CloudShell): VPC, tiers, firewalls, replication, failover
+tests/          Unit tests for the web tier and the microservices
+.github/        CI/CD: lint, tests, compose integration test, 4 images to GHCR
 practical6/     Ubuntu + Apache2 Dockerfile
-infra/          AWS CLI scripts that built the infrastructure (run in CloudShell)
-Dockerfile      SecureBank container image
-.github/        CI/CD pipeline
 ```
 
 ---
 
 ## ▶️ Running
 
-**Locally**
+**Locally (all three tiers)**
 ```bash
-docker build -t securebank .
-docker run -p 8080:80 -e DB_HOST=... -e DB_PASSWORD=... -e SECRET_KEY=... securebank
+docker compose up --build      # then open http://localhost:8080  (akshata / demo123)
 ```
 
 **On Kubernetes**
 ```bash
-kubectl create secret generic securebank-db --from-literal=DB_PASSWORD=... --from-literal=SECRET_KEY=...
+kubectl create secret generic securebank-db --from-literal=DB_PASSWORD=... --from-literal=SECRET_KEY=... --from-literal=INTERNAL_TOKEN=...
 kubectl apply -f k8s/securebank.yaml
+```
+
+**Build the AWS infrastructure (CloudShell, in order)**
+```bash
+bash infra/09-three-tier.sh secrets|network|ilb|api|web|rds|multiaz|nacl|waf|lockdown
+bash infra/10-replication-source.sh binlog; bash infra/10-replication-source.sh relay <mumbai-ip>
+# on the Mumbai standby (Systems Manager Run Command): 11-mumbai-standby.sh eip | replica | stack
+bash infra/12-route53-three-level.sh <mumbai-public-lb-dns>
 ```
 
 **Deploy the latest image (CloudShell)**
 ```bash
-bash infra/deploy.sh        # pulls ghcr.io/akshata1412/securebank:latest onto both EC2 servers and k3s
+bash infra/deploy.sh        # pulls the 4 images onto api-a/b, web-1/2 and k3s (through Systems Manager)
 ```
 
 **Disaster recovery demos (CloudShell, with the app's `/dr` page open beside it)**
@@ -127,10 +143,18 @@ bash infra/demo.sh outage       # disaster: Sydney goes dark, Route 53 fails ove
 bash infra/demo.sh recover-site # servers come back, DNS returns to the load balancer, RTO is measured
 ```
 
-**Measured in the region-failure drill (15 Nov 2026):** both Sydney servers stopped → Route 53 sent traffic to the
-Mumbai standby in **41 s**; logging in there showed akshata's balance as **Rs 31,587**, the same as Sydney, including
-a transfer made 20 s before the outage (no data lost). Sydney was back in service **66 s** after recovery started.
-Replication is one way (Sydney → Mumbai), so transfers made in Mumbai during an outage are not copied back.
+**Measured in the region-failure drill on the three-tier stack (15 Nov 2026):**
+
+| Step | Result |
+|---|---|
+| Replication lag Sydney → Mumbai | a new transfer was already in Mumbai on the first check (under 1 s, 0 s behind) |
+| Both Sydney web servers stopped → Route 53 sends customers to Mumbai | **39 s** |
+| Balance seen in Mumbai | Rs 29,524, identical to Sydney (no data lost) |
+| Watcher promotes the Mumbai replica (Sydney down 60 s) | automatic; a Rs 250 transfer then succeeded in Mumbai |
+| Sydney back, Route 53 returns customers | **69 s** after recovery started |
+
+Replication is one way (Sydney → Mumbai), so transfers made in Mumbai during an outage are not copied back; after
+failback the Mumbai replica is re-seeded from Sydney (`11-mumbai-standby.sh replica`).
 
 The app's **`/dr`** page (Disaster recovery room) compares RDS with the DR bucket on every refresh, shows the
 recovery point (replication lag) and the recovery time measured in the last drill, and lists every drill event.
@@ -140,9 +164,14 @@ the database, backups and CloudTrail, all read live from AWS.
 
 **Second region (Mumbai standby)**
 ```bash
-# In the second account: launch an EC2 (Amazon Linux 2023, t2.micro) with infra/07-mumbai-standby-userdata.sh
-# as user data (fill in the Sydney load balancer DNS and ~/.sb_repl_token) and an instance role with S3 access. Then, in the Sydney account's CloudShell:
-bash infra/08-route53-mumbai.sh <mumbai-public-dns>   # make Mumbai the Route 53 failover target
+# Sydney CloudShell
+bash infra/10-replication-source.sh binlog                 # binary logs + TLS-only replication user
+bash infra/10-replication-source.sh relay <mumbai-ip>      # relay on the NAT instance, open only to Mumbai
+# Mumbai standby (Systems Manager Run Command, second account)
+bash 11-mumbai-standby.sh replica <relay-ip> <repl-password>   # MySQL 8.4 replica, read-only
+bash 11-mumbai-standby.sh stack <sydney-alb-dns>               # ALBs, 2 servers, microservices, promotion watcher
+# Sydney CloudShell
+bash infra/12-route53-three-level.sh                        # Sydney → Mumbai → S3 static page
 ```
 
 **Turn the AWS demo on/off (CloudShell)**

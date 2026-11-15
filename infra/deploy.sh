@@ -1,61 +1,54 @@
 #!/bin/bash
-# Deploy the latest image from GitHub Container Registry to both EC2 web servers
-# and the k3s cluster. Run in CloudShell:  bash ~/sbrepo/infra/deploy.sh
+# Deploy the latest images (three tiers) from GitHub Container Registry. Run in CloudShell:
+#   bash ~/sbrepo/infra/deploy.sh
+# Tier 2: api-a / api-b pull users, accounts, passbook (secrets from SSM Parameter Store).
+# Tier 1: web-1 / web-2 pull the web image, pointed at the internal load balancer.
+# Kubernetes: the same four images, applied from k8s/securebank.yaml.
+# Everything on EC2 goes through AWS Systems Manager, so no SSH port is open on the web or API tiers.
 set -e
 source ~/securebank-vpc.env; export AWS_DEFAULT_REGION=ap-southeast-2
-IMG=ghcr.io/akshata1412/securebank:latest
-ROLE=SecureBank-EC2-S3-Role
+GH=ghcr.io/akshata1412
+run(){ # "ids" "commands"
+  printf '%s' "$2" | python3 -c 'import json,sys; print(json.dumps({"commands": [sys.stdin.read()]}))' > /tmp/ssm-params.json
+  local cid; cid=$(aws ssm send-command --instance-ids $1 --document-name AWS-RunShellScript --parameters file:///tmp/ssm-params.json --query Command.CommandId --output text)
+  for i in $1; do
+    for n in $(seq 1 90); do st=$(aws ssm get-command-invocation --command-id $cid --instance-id $i --query Status --output text 2>/dev/null || echo Pending)
+      case $st in Success|Failed|Cancelled|TimedOut) break;; esac; sleep 4; done
+    echo "  $i: $st $(aws ssm get-command-invocation --command-id $cid --instance-id $i --query StandardOutputContent --output text | tail -3 | tr '\n' ' ')"
+  done; }
 
-echo "== IAM: read-only permissions for the Infrastructure page =="
-cat > /tmp/infra-read.json <<JSON
-{"Version":"2012-10-17","Statement":[
- {"Sid":"InfraRead","Effect":"Allow","Action":["route53:GetHealthCheckStatus","elasticloadbalancing:DescribeTargetHealth",
-  "ec2:DescribeInstances","cloudtrail:GetTrail","cloudtrail:GetTrailStatus"],"Resource":"*"},
- {"Sid":"BackupRead","Effect":"Allow","Action":["s3:ListBucket","s3:GetObject","s3:GetObjectVersion"],
-  "Resource":["arn:aws:s3:::securebank-backups-akshata-2026","arn:aws:s3:::securebank-backups-akshata-2026/*",
-              "arn:aws:s3:::securebank-dr-backup-akshata-2026","arn:aws:s3:::securebank-dr-backup-akshata-2026/*"]}]}
-JSON
-aws iam put-role-policy --role-name $ROLE --policy-name SecureBank-Infra-ReadOnly --policy-document file:///tmp/infra-read.json
+echo "== Tier 2: microservices on api-a and api-b =="
+run "$APIA $APIB" "/usr/local/bin/sb-api-deploy"
 
-echo "== ALB: faster failure detection for the demo =="
-aws elbv2 modify-target-group --target-group-arn $TG --health-check-interval-seconds 5 --health-check-timeout-seconds 3 \
-  --healthy-threshold-count 2 --unhealthy-threshold-count 2 >/dev/null
-aws elbv2 modify-target-group-attributes --target-group-arn $TG --attributes Key=deregistration_delay.timeout_seconds,Value=5 >/dev/null
+echo "== Tier 1: web app on web-1 and web-2 =="
+run "$WEB1 $WEB2" "set -e
+export AWS_DEFAULT_REGION=ap-southeast-2
+P(){ aws ssm get-parameter --name \$1 --with-decryption --query Parameter.Value --output text; }
+T=\$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+IID=\$(curl -s -H \"X-aws-ec2-metadata-token: \$T\" http://169.254.169.254/latest/meta-data/instance-id)
+AZ=\$(curl -s -H \"X-aws-ec2-metadata-token: \$T\" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+docker pull -q $GH/securebank-web:latest >/dev/null
+docker rm -f securebank-app >/dev/null 2>&1 || true
+docker run -d --name securebank-app --restart always -p 80:80 -e API_URL=http://$ILBDNS \
+  -e INTERNAL_TOKEN=\$(P /securebank/internal-token) -e SECRET_KEY=\$(P /securebank/secret-key) \
+  -e SERVER_ID=\"\$IID (\$AZ)\" -e TARGET_GROUP_ARN=$TG -e HEALTH_CHECK_ID=$HC -e AWS_REGION=ap-southeast-2 \
+  $GH/securebank-web:latest >/dev/null
+sleep 3; curl -s localhost/health/deep | head -c 120"
 
-[ -f ~/.sb_secret_key ] || openssl rand -hex 24 > ~/.sb_secret_key
-# Shared token for the replication feed the Mumbai standby pulls (give the same value to the standby)
-[ -f ~/.sb_repl_token ] || openssl rand -hex 24 > ~/.sb_repl_token
+echo "== Kubernetes: web + 3 microservices =="
 rm -f ~/dkey ~/dkey.pub; ssh-keygen -t ed25519 -N '' -f ~/dkey -q
-SSHO="-i $HOME/dkey -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
-push_key(){ aws ec2-instance-connect send-ssh-public-key --instance-id $1 --instance-os-user ec2-user --ssh-public-key file://~/dkey.pub >/dev/null; }
-ip_of(){ aws ec2 describe-instances --instance-ids $1 --query 'Reservations[0].Instances[0].PublicIpAddress' --output text; }
-
-for I in $WEB1 $WEB2; do
-  echo "== EC2 $I: pull and restart =="
-  push_key $I
-  # The DB password is read from the copy already on the server; it is never typed or stored here.
-  ssh $SSHO ec2-user@$(ip_of $I) "set -e
-    DBPW=\$(grep \"'password'\" /opt/securebank/app.py | cut -d\"'\" -f4)
-    TOKEN=\$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-    IID=\$(curl -s -H \"X-aws-ec2-metadata-token: \$TOKEN\" http://169.254.169.254/latest/meta-data/instance-id)
-    AZ=\$(curl -s -H \"X-aws-ec2-metadata-token: \$TOKEN\" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-    sudo docker pull -q $IMG
-    sudo docker rm -f securebank-app >/dev/null 2>&1 || true
-    sudo docker run -d --name securebank-app --restart always -p 80:80 \
-      -e DB_HOST=securebank-db.cdiauaewk6q6.ap-southeast-2.rds.amazonaws.com -e DB_USER=admin -e DB_PASSWORD=\"\$DBPW\" \
-      -e SECRET_KEY=$(cat ~/.sb_secret_key) -e REPL_TOKEN=$(cat ~/.sb_repl_token) -e SERVER_ID=\"\$IID (\$AZ)\" \
-      -e TARGET_GROUP_ARN=$TG -e HEALTH_CHECK_ID=$HC $IMG >/dev/null
-    echo running \$(sudo docker inspect -f '{{.Config.Image}}' securebank-app) on \$IID"
-done
-
-echo "== k3s: apply manifest and roll out =="
-MIP=$(ip_of $K8SM)
-push_key $K8SM
-ssh $SSHO ec2-user@$MIP 'kubectl apply -f - >/dev/null' < ~/sbrepo/k8s/securebank.yaml
-push_key $K8SM
-ssh $SSHO ec2-user@$MIP "kubectl patch configmap securebank-config --type merge -p '{\"data\":{\"TARGET_GROUP_ARN\":\"$TG\",\"HEALTH_CHECK_ID\":\"$HC\"}}' >/dev/null
-  kubectl rollout restart deployment/securebank >/dev/null
-  kubectl rollout status deployment/securebank --timeout=180s"
+MIP=$(aws ec2 describe-instances --instance-ids $K8SM --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+P(){ aws ssm get-parameter --name $1 --with-decryption --query Parameter.Value --output text; }
+aws ec2-instance-connect send-ssh-public-key --instance-id $K8SM --instance-os-user ec2-user --ssh-public-key file://~/dkey.pub >/dev/null
+ssh -i ~/dkey -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@$MIP "kubectl create secret generic securebank-db \
+  --from-literal=DB_PASSWORD='$(P /securebank/db-password)' --from-literal=SECRET_KEY='$(P /securebank/secret-key)' \
+  --from-literal=INTERNAL_TOKEN='$(P /securebank/internal-token)' --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl delete deployment securebank --ignore-not-found >/dev/null
+  kubectl apply -f - >/dev/null" < ~/sbrepo/k8s/securebank.yaml
+aws ec2-instance-connect send-ssh-public-key --instance-id $K8SM --instance-os-user ec2-user --ssh-public-key file://~/dkey.pub >/dev/null
+ssh -i ~/dkey -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@$MIP "kubectl patch configmap securebank-config --type merge -p '{\"data\":{\"TARGET_GROUP_ARN\":\"$TG\",\"HEALTH_CHECK_ID\":\"$HC\"}}' >/dev/null
+  kubectl rollout restart deployment >/dev/null
+  for d in users accounts passbook securebank-web; do kubectl rollout status deployment/\$d --timeout=240s; done"
 rm -f ~/dkey ~/dkey.pub
 echo "App:      http://$ALBDNS/infra"
 echo "On k8s:   http://$MIP:30081/infra"

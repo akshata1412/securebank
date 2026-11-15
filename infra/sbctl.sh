@@ -15,6 +15,8 @@ case "$1" in
   [ "$(rule)" = None ] && aws elbv2 create-rule --listener-arn $LISTENER --priority 5 \
     --conditions Field=path-pattern,Values=/maintenance \
     --actions '[{"Type":"fixed-response","FixedResponseConfig":{"StatusCode":"200","ContentType":"text/plain","MessageBody":"planned shutdown"}}]' >/dev/null
+  for i in $(seq 1 24); do curl -s -m 5 http://$ALBDNS/maintenance | grep -q planned && break; sleep 5; done  # ~20 s to go live
+  echo "flag is live"
   echo "== Stopping servers, NAT instance and database =="
   aws ec2 stop-instances --instance-ids $SERVERS $NAT --query 'StoppingInstances[].InstanceId' --output text
   aws rds stop-db-instance --db-instance-identifier securebank-db --query DBInstance.DBInstanceStatus --output text 2>/dev/null || true

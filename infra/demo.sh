@@ -20,7 +20,12 @@ ip_of(){ aws ec2 describe-instances --instance-ids $1 --query 'Reservations[0].I
 key(){ [ -f ~/dkey ] || ssh-keygen -t ed25519 -N '' -f ~/dkey -q; aws ec2-instance-connect send-ssh-public-key --instance-id $1 --instance-os-user ec2-user --ssh-public-key file://~/dkey.pub >/dev/null; }
 on(){ I=$1; shift; key $I; ssh -i ~/dkey -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@$(ip_of $I) "$@"; }
 k(){ on $K8SM "$@"; }
-app_exec(){ on $WEB2 "sudo docker exec securebank-app python recovery.py $*"; }
+app_exec(){ # run the recovery tool inside passbook-management on api-a (through Systems Manager, no SSH)
+  printf '%s' "docker exec passbook python recovery.py $*" | python3 -c 'import json,sys; print(json.dumps({"commands": [sys.stdin.read()]}))' > /tmp/ssm-params.json
+  local cid; cid=$(aws ssm send-command --instance-ids $APIA --document-name AWS-RunShellScript --parameters file:///tmp/ssm-params.json --query Command.CommandId --output text)
+  for n in $(seq 1 40); do st=$(aws ssm get-command-invocation --command-id $cid --instance-id $APIA --query Status --output text 2>/dev/null || echo Pending)
+    case $st in Success|Failed) break;; esac; sleep 2; done
+  aws ssm get-command-invocation --command-id $cid --instance-id $APIA --query '[StandardOutputContent,StandardErrorContent]' --output text; }
 event(){ # level text [seconds] [kind]: append to the DR timeline shown on the /dr page
   S=""; [ -n "$3" ] && S=",\"seconds\":$3"; [ -n "$4" ] && S="$S,\"kind\":\"$4\""
   echo "{\"time\":\"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\",\"level\":\"$1\",\"text\":\"$2\"$S}" | \

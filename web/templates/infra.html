@@ -16,6 +16,12 @@
     {% else %}<p class="err">{{ lb.error }}</p>{% endif %}
   </section>
   <section class="reg">
+    {% set up = s.services | selectattr('ok') | list | length %}
+    <div class="reg-head"><h2>Microservices</h2>{{ state(up == s.services|length, (up|string) ~ ' of ' ~ (s.services|length|string) ~ ' services up', (up|string) ~ ' of ' ~ (s.services|length|string) ~ ' services up') }}</div>
+    <dl class="rows">{% for v in s.services %}<dt>{{ v.name }}</dt><dd style="color:var({{ '--credit' if v.ok else '--debit' }})">{% if v.ok %}answered by {{ v.server }} in {{ v.ms }} ms{% else %}{{ v.error }}{% endif %}</dd>{% endfor %}</dl>
+    <p class="lede" style="margin-top:8px">Reached through the internal load balancer. This web server has no database password.</p>
+  </section>
+  <section class="reg">
     <div class="reg-head"><h2>Database</h2>{{ state(d.ok, 'Connected', 'Unreachable') }}</div>
     {% if d.ok %}<dl class="rows"><dt>Instance</dt><dd>{{ d.host }}, MySQL {{ d.version }}</dd><dt>Query time</dt><dd class="num">{{ d.latency_ms }} ms</dd><dt>Customers</dt><dd class="num">{{ d.users }}</dd><dt>Transactions</dt><dd class="num">{{ d.transactions }}</dd></dl>
     {% else %}<p class="err">{{ d.error }}</p>{% endif %}
@@ -26,8 +32,8 @@
     {% elif not b.ok %}<p class="err">{{ b.error }}</p>{% endif %}
   </section>
   <section class="reg">
-    <div class="reg-head"><h2>DNS and failover</h2>{{ state(r.ok, (r.healthy|string) ~ ' of ' ~ (r.total|string) ~ ' checkers see us' if r.total is defined else '', 'Failing over to S3', 'Not configured') }}</div>
-    {% if r.total is defined %}<dl class="rows"><dt>Address</dt><dd>{{ r.record }}</dd><dt>If the load balancer fails</dt><dd>Visitors go to the S3 status page</dd><dt>Health check</dt><dd>/health on the load balancer</dd></dl>
+    <div class="reg-head"><h2>DNS and failover</h2>{{ state(r.ok, (r.healthy|string) ~ ' of ' ~ (r.total|string) ~ ' checkers see us' if r.total is defined else '', 'Failing over', 'Not configured') }}</div>
+    {% if r.total is defined %}<dl class="rows"><dt>Address</dt><dd>{{ r.record }}</dd><dt>If Sydney fails</dt><dd>Customers go to the Mumbai standby</dd><dt>If both regions fail</dt><dd>Customers see the S3 static page</dd><dt>Health check</dt><dd>/health/deep: web, every microservice and the database</dd></dl>
     {% else %}<p class="err">{{ r.error }}</p>{% endif %}
   </section>
   <section class="reg">

@@ -1,0 +1,3 @@
+-- SecureBank schema (tier 3). Created by docker compose for local runs.
+CREATE TABLE IF NOT EXISTS users ( username VARCHAR(50) PRIMARY KEY, password VARCHAR(100) NOT NULL, name VARCHAR(100) NOT NULL, account VARCHAR(20) NOT NULL, balance INT NOT NULL DEFAULT 0, created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS transactions ( id VARCHAR(20) PRIMARY KEY, from_user VARCHAR(50) NOT NULL, to_user VARCHAR(50) NOT NULL, from_account VARCHAR(20) NOT NULL, to_account VARCHAR(20) NOT NULL, amount INT NOT NULL, note VARCHAR(200), timestamp TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP, backed_up TINYINT(1) DEFAULT 0, FOREIGN KEY (from_user) REFERENCES users(username), FOREIGN KEY (to_user) REFERENCES users(username));

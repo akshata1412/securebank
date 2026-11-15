@@ -5,7 +5,7 @@ bucket. This module compares the database with the DR copy, measures the
 recovery point (replication lag), keeps an event log in S3, and rebuilds
 missing ledger rows from the DR bucket.
 
-Run inside the app container:
+Run inside the passbook-management container:
     python recovery.py status
     python recovery.py restore
     python recovery.py simulate-loss --yes
@@ -300,7 +300,8 @@ def sync(db_connect):
 
 
 def _main(argv):
-    import app  # the app module holds the database connection settings
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    from common import svc as app  # holds the database connection settings
     cmd = argv[1] if len(argv) > 1 else 'status'
     if cmd == 'status':
         r = status(app.db)

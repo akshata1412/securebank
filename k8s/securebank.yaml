@@ -10,6 +10,9 @@ data:
   DB_NAME: securebank
   S3_BUCKET: securebank-backups-akshata-2026
   AWS_REGION: ap-southeast-2
+  DR_BUCKET: securebank-dr-backup-akshata-2026
+  TRAIL_NAME: securebank-audit-trail
+  # TARGET_GROUP_ARN and HEALTH_CHECK_ID are filled in by infra/deploy.sh
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -27,7 +30,7 @@ spec:
       containers:
       - name: securebank
         image: ghcr.io/akshata1412/securebank:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         ports:
         - containerPort: 80
         envFrom:
@@ -37,6 +40,9 @@ spec:
         - name: SERVER_ID
           valueFrom:
             fieldRef: {fieldPath: metadata.name}
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef: {fieldPath: spec.nodeName}
         resources:
           requests: {cpu: 50m, memory: 96Mi}
           limits: {memory: 256Mi}

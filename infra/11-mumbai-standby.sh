@@ -153,7 +153,10 @@ APPS
 #!/bin/bash
 source /root/sb-mumbai.env; FAILS=0
 while true; do
-  if curl -sf -m 5 "$SYDHEALTH" >/dev/null; then FAILS=0; else FAILS=$((FAILS+1)); fi
+  # A planned shutdown (sbctl.sh stop) makes Sydney's load balancer answer /maintenance: not a disaster, don't promote.
+  if curl -sf -m 5 "$SYDHEALTH" >/dev/null; then FAILS=0
+  elif curl -s -m 5 "${SYDHEALTH%/health/deep}/maintenance" | grep -q planned; then FAILS=0
+  else FAILS=$((FAILS+1)); fi
   RUNNING=$(docker exec replica mysql -uroot -p"$ROOTPW" -N -e "SELECT SERVICE_STATE FROM performance_schema.replication_connection_status" 2>/dev/null)
   if [ $FAILS -ge 6 ] && [ -n "$RUNNING" ]; then echo "$(date -u +%FT%TZ) Sydney down for 60 s: promoting"; /usr/local/bin/sb-mumbai promote; fi
   sleep 10

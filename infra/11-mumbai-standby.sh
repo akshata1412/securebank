@@ -58,7 +58,8 @@ replica)
   echo "== Start replicating, then lock the replica read-only =="
   q "CREATE USER IF NOT EXISTS 'app'@'%' IDENTIFIED BY '$APPPW'; GRANT SELECT, INSERT, UPDATE, DELETE ON securebank.* TO 'app'@'%';"
   q "CHANGE REPLICATION SOURCE TO SOURCE_HOST='$RELAY', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='$RPW',
-     SOURCE_LOG_FILE='$FILE', SOURCE_LOG_POS=$OFF, SOURCE_SSL=1, GET_SOURCE_PUBLIC_KEY=1; START REPLICA;
+     SOURCE_LOG_FILE='$FILE', SOURCE_LOG_POS=$OFF, SOURCE_SSL=1, GET_SOURCE_PUBLIC_KEY=1,
+     SOURCE_RETRY_COUNT=100000, SOURCE_CONNECT_RETRY=60; START REPLICA;
      SET PERSIST read_only=ON; SET PERSIST super_read_only=ON;"
   sleep 5
   docker exec replica mysql -uroot -p"$ROOTPW" -e "SHOW REPLICA STATUS\G" 2>/dev/null | grep -E 'Replica_IO_Running|Replica_SQL_Running:|Seconds_Behind_Source|Last_.*Error:' | grep -v ': $'

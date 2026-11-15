@@ -55,6 +55,8 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false      # one registry hiccup should not cancel the other images
+      max-parallel: 2
       matrix:
         image: [web, users, accounts, passbook]
     steps:
@@ -73,5 +75,4 @@ jobs:
         else
           docker build -f services/Dockerfile --build-arg SERVICE=${{ matrix.image }} -t $IMG:${{ github.sha }} -t $IMG:latest .
         fi
-        docker push $IMG:${{ github.sha }}
-        docker push $IMG:latest
+        for i in 1 2 3; do docker push $IMG:${{ github.sha }} && docker push $IMG:latest && exit 0; echo "push failed, retrying"; sleep 15; done; exit 1

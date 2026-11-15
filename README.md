@@ -127,6 +127,11 @@ bash infra/demo.sh outage       # disaster: Sydney goes dark, Route 53 fails ove
 bash infra/demo.sh recover-site # servers come back, DNS returns to the load balancer, RTO is measured
 ```
 
+**Measured in the region-failure drill (15 Nov 2026):** both Sydney servers stopped → Route 53 sent traffic to the
+Mumbai standby in **41 s**; logging in there showed akshata's balance as **Rs 31,587**, the same as Sydney, including
+a transfer made 20 s before the outage (no data lost). Sydney was back in service **66 s** after recovery started.
+Replication is one way (Sydney → Mumbai), so transfers made in Mumbai during an outage are not copied back.
+
 The app's **`/dr`** page (Disaster recovery room) compares RDS with the DR bucket on every refresh, shows the
 recovery point (replication lag) and the recovery time measured in the last drill, and lists every drill event.
 During a full outage it stays reachable through the Kubernetes copy of the app (NodePort 30081).

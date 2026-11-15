@@ -6,7 +6,7 @@
 #   bash ~/sbrepo/infra/demo.sh dr         # make a transfer, watch it replicate to the DR bucket
 #   bash ~/sbrepo/infra/demo.sh wipe       # disaster: the transaction ledger is wiped from RDS
 #   bash ~/sbrepo/infra/demo.sh recover    # rebuild the ledger from the DR bucket
-#   bash ~/sbrepo/infra/demo.sh outage     # disaster: both servers die, Route 53 fails over to S3
+#   bash ~/sbrepo/infra/demo.sh outage     # disaster: Sydney goes dark, Route 53 fails over to the Mumbai standby
 #   bash ~/sbrepo/infra/demo.sh recover-site  # bring the site back and measure recovery time
 source ~/securebank-vpc.env; export AWS_DEFAULT_REGION=ap-southeast-2
 B=securebank-backups-akshata-2026; DR=securebank-dr-backup-akshata-2026
@@ -131,7 +131,7 @@ recover-site)
   RTO=$(( $(date +%s) - T0 )); DOWN=$(( $(date +%s) - START ))
   event ok "Service restored: both servers healthy and Route 53 back on the load balancer" $RTO
   rm -f ~/.sb_outage_start
-  echo; echo "Recovery time (RTO): $RTO s from starting recovery. Total time on the status page: $DOWN s."
+  echo; echo "Recovery time (RTO): $RTO s from starting recovery. Total time customers were on the backup site: $DOWN s."
   echo "Customer data lost: none (check the /dr page)." ;;
 *) sed -n 2,10p "$0" ;;
 esac

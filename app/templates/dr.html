@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block head %}<meta http-equiv="refresh" content="5">{% endblock %}
+{% block title %}Disaster recovery · SecureBank{% endblock %}
+{% macro dur(s) -%}{% if s is none %}Not measured{% elif s < 90 %}{{ s|round|int }} s{% else %}{{ (s // 60)|int }} min {{ (s % 60)|round|int }} s{% endif %}{%- endmacro %}
+{% block main %}
+<h1>Disaster recovery room</h1>
+{% if r.state == 'safe' %}
+<p class="status-line good">Every transaction has a safe copy in the DR vault.</p>
+{% elif r.state == 'loss' %}
+<p class="status-line bad">{{ r.missing|length }} transactions are missing from the database. The DR vault still holds them.</p>
+{% else %}
+<p class="status-line bad">The database can't be reached. Customer records are safe in the DR vault.</p>
+{% endif %}
+<p class="live">Checked live against RDS and the S3 DR bucket on every request, refreshing every 5 seconds. Generated in {{ ms }} ms.</p>
+
+<div class="figures">
+  <div class="figure"><div class="v {{ 'bad' if not r.db_ok or r.missing }}">{{ r.db_count if r.db_ok else 'Down' }}</div><div class="k">Records in the database</div></div>
+  <div class="figure"><div class="v">{{ r.dr_count if r.dr_ok else '?' }}</div><div class="k">Copies in the DR vault</div></div>
+  <div class="figure"><div class="v">{% if r.rpo %}{{ dur(r.rpo.seconds) }}{% else %}Not measured{% endif %}</div><div class="k">{% if r.rpo and r.rpo.pending %}Newest backup still copying{% else %}Recovery point: how far the vault trails a new transfer{% endif %}</div></div>
+  <div class="figure"><div class="v">{{ dur(r.rto.seconds) if r.rto else 'Not measured' }}</div><div class="k">Recovery time in the last drill</div></div>
+</div>
+
+<div class="register">
+  <section class="reg">
+    <div class="reg-head"><h2>Recent events</h2></div>
+    {% if r.events %}
+    <ol class="timeline" reversed>
+      {% for e in r.events %}<li><time>{{ e.time | ist('%d %b, %I:%M:%S %p') }}</time><span class="{{ e.level }}">{{ e.text }}{% if e.seconds is defined %} ({{ dur(e.seconds) }}){% endif %}</span></li>{% endfor %}
+    </ol>
+    {% else %}<p class="lede">No drills run yet. Events from backups, outages and restores will appear here.</p>{% endif %}
+  </section>
+  <section class="reg">
+    <div class="reg-head"><h2>How a record is protected</h2></div>
+    <ol class="steps">
+      <li>A transfer is saved in Amazon RDS inside one database transaction.</li>
+      <li>The app writes the same transfer as a JSON file to the S3 backup bucket.</li>
+      <li>S3 replication copies the file to a separate DR bucket, usually within seconds.</li>
+      <li>This page compares the database with the DR bucket on every refresh.</li>
+      <li>If records go missing, one restore command rebuilds them from the DR bucket.</li>
+    </ol>
+    {% if r.not_in_dr %}<p class="lede" style="margin-top:12px">{{ r.not_in_dr|length }} recent transactions are still being copied to the vault.</p>{% endif %}
+    {% if r.missing %}<p class="err" style="margin-top:12px">Missing from the database: {{ r.missing|join(', ') }}</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

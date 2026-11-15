@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block head %}<meta http-equiv="refresh" content="5">{% endblock %}
+{% block title %}Live infrastructure · SecureBank{% endblock %}
+{% macro state(ok, good, bad, na='Not set up') -%}
+<span class="state {{ 'ok' if ok else ('na' if ok is none else 'bad') }}">{{ good if ok else (na if ok is none else bad) }}</span>
+{%- endmacro %}
+{% block main %}
+{% set c, lb, d, b, r, sec = s.compute, s.lb, s.database, s.backups, s.dns, s.security %}
+<h1>What's serving you right now</h1>
+<p class="served">This request was answered by <strong>{{ c.instance_name or c.container }}</strong>{% if c.az %} in Availability Zone <strong>{{ c.az }}</strong>{% endif %}{% if c.node %} on Kubernetes node <strong>{{ c.node }}</strong>{% endif %}. Refresh and the load balancer may send you to the other server.</p>
+<p class="live">Read live from AWS on every request, refreshing every 5 seconds. Generated in {{ ms }} ms.</p>
+<div class="register">
+  <section class="reg">
+    <div class="reg-head"><h2>Load balancer</h2>{{ state(lb.ok, (lb.healthy|string) ~ ' of ' ~ (lb.total|string) ~ ' servers healthy' if lb.targets is defined else '', 'No healthy servers', 'Not configured') }}</div>
+    {% if lb.targets is defined %}<dl class="rows">{% for t in lb.targets %}<dt>{{ t.name }}</dt><dd class="{{ 'd' if t.state == 'healthy' else 'w' }}" style="color:var({{ '--credit' if t.state == 'healthy' else '--debit' }})">{{ t.state }}{% if t.reason and t.state != 'healthy' %} ({{ t.reason }}){% endif %}</dd>{% endfor %}</dl>
+    {% else %}<p class="err">{{ lb.error }}</p>{% endif %}
+  </section>
+  <section class="reg">
+    <div class="reg-head"><h2>Database</h2>{{ state(d.ok, 'Connected', 'Unreachable') }}</div>
+    {% if d.ok %}<dl class="rows"><dt>Instance</dt><dd>{{ d.host }}, MySQL {{ d.version }}</dd><dt>Query time</dt><dd class="num">{{ d.latency_ms }} ms</dd><dt>Customers</dt><dd class="num">{{ d.users }}</dd><dt>Transactions</dt><dd class="num">{{ d.transactions }}</dd></dl>
+    {% else %}<p class="err">{{ d.error }}</p>{% endif %}
+  </section>
+  <section class="reg">
+    <div class="reg-head"><h2>Backups</h2>{{ state((true if b.count else none) if b.ok else false, ('Copied to DR vault' if b.in_dr else 'Copy pending') if b.count else '', 'Unreadable', 'No backups yet') }}</div>
+    {% if b.ok and b.count %}<dl class="rows"><dt>Backup files in S3</dt><dd class="num">{{ b.count }}</dd><dt>Newest backup</dt><dd>{{ b.latest_time | ist('%d %b, %I:%M:%S %p') }}</dd><dt>Replication status</dt><dd>{{ b.replication | lower | capitalize }}</dd><dt>Copy in DR bucket</dt><dd>{{ 'Yes' if b.in_dr else 'Not yet' }}</dd></dl>
+    {% elif not b.ok %}<p class="err">{{ b.error }}</p>{% endif %}
+  </section>
+  <section class="reg">
+    <div class="reg-head"><h2>DNS and failover</h2>{{ state(r.ok, (r.healthy|string) ~ ' of ' ~ (r.total|string) ~ ' checkers see us' if r.total is defined else '', 'Failing over to S3', 'Not configured') }}</div>
+    {% if r.total is defined %}<dl class="rows"><dt>Address</dt><dd>{{ r.record }}</dd><dt>If the load balancer fails</dt><dd>Visitors go to the S3 status page</dd><dt>Health check</dt><dd>/health on the load balancer</dd></dl>
+    {% else %}<p class="err">{{ r.error }}</p>{% endif %}
+  </section>
+  <section class="reg">
+    <div class="reg-head"><h2>Compute</h2><span class="state ok">Running</span></div>
+    <dl class="rows"><dt>Platform</dt><dd>{{ c.platform }}</dd><dt>Container</dt><dd>{{ c.container }}</dd>{% if c.instance_id %}<dt>EC2 instance</dt><dd>{{ c.instance_id }}, {{ c.instance_type }}</dd>{% endif %}{% if c.az %}<dt>Availability Zone</dt><dd>{{ c.az }}</dd>{% endif %}<dt>Region</dt><dd>{{ region }}</dd></dl>
+  </section>
+  <section class="reg">
+    <div class="reg-head"><h2>Security and audit</h2>{{ state(sec.ok, 'Logging', 'Check CloudTrail') }}</div>
+    {% if sec.trail is defined %}<dl class="rows"><dt>CloudTrail</dt><dd>{{ sec.trail }}{% if sec.multi_region %}, all regions{% endif %}</dd><dt>Log encryption</dt><dd>KMS key {{ sec.kms }}</dd><dt>Log file validation</dt><dd>{{ 'On' if sec.validation else 'Off' }}</dd><dt>Last log delivered</dt><dd>{{ sec.last_delivery | ist('%d %b, %I:%M %p') if sec.last_delivery else 'Not yet' }}</dd></dl>
+    {% else %}<p class="err">{{ sec.error }}</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

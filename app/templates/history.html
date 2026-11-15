@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% from '_ledger.html' import ledger %}
+{% block title %}Passbook · SecureBank{% endblock %}
+{% block main %}
+<h1>Passbook</h1>
+<p class="lede">{{ user.name }}, savings account {{ user.account }}. Every entry is stored in Amazon RDS and copied to the DR vault in S3.</p>
+<section class="pages" style="margin-top:24px;border-radius:6px">{{ ledger(entries, users, user.username) }}</section>
+{% endblock %}

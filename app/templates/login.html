@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block title %}Sign in to SecureBank{% endblock %}
+{% block body %}
+<div class="signin">
+  <section class="signin-art">
+    <div>{{ seal(52) }}</div>
+    <div>
+      <p class="big">Every rupee, kept twice.</p>
+      <p>Your balance lives in a managed database, and every transfer is copied to a second, separate vault within seconds. If a server or a whole site fails, your account doesn't.</p>
+    </div>
+    <p class="stack">Running on Amazon Web Services in Sydney: two servers, a load balancer, Kubernetes and a disaster-recovery vault.</p>
+  </section>
+  <section class="signin-form">
+    <form method="post">
+      <h1>Sign in</h1>
+      <p class="lede" style="margin-bottom:22px">Use one of the demo accounts below.</p>
+      <div class="field"><label for="u">Username</label><input id="u" name="username" autocomplete="username" required autofocus></div>
+      <div class="field"><label for="p">Password</label><input id="p" type="password" name="password" autocomplete="current-password" required></div>
+      <button class="btn" type="submit">Sign in</button>
+      {% if error %}<div class="notice bad" role="alert">{{ error }}</div>{% endif %}
+      <p class="demo">Demo accounts: <code>akshata</code>, <code>rahul</code> or <code>priya</code>, password <code>demo123</code>.<br>Not signing in? See the <a href="{{ url_for('infra_page') }}">live infrastructure</a> or the <a href="{{ url_for('dr_page') }}">disaster recovery room</a>.</p>
+    </form>
+  </section>
+</div>
+{% endblock %}

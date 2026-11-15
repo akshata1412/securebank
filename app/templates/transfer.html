@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block title %}Send money · SecureBank{% endblock %}
+{% block main %}
+<h1>Send money</h1>
+<p class="lede">From {{ user.account }}. Available: <span class="num">Rs {{ user.balance | inr }}</span></p>
+<form class="form-sheet" method="post">
+  <div class="field">
+    <label for="to">Pay to</label>
+    <select id="to" name="recipient" required>
+      <option value="">Choose an account</option>
+      {% for u, d in users.items() %}{% if u != current_user %}<option value="{{ u }}">{{ d.name }}, {{ d.account }}</option>{% endif %}{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="amt">Amount</label>
+    <div class="amount"><span>Rs</span><input id="amt" type="number" name="amount" min="1" max="{{ user.balance }}" inputmode="numeric" required></div>
+  </div>
+  <div class="field">
+    <label for="note">Note for the passbook</label>
+    <input id="note" name="note" maxlength="200" placeholder="Rent, books, dinner">
+    <p class="hint">Shown to both of you.</p>
+  </div>
+  <button class="btn" type="submit">Send money</button>
+  {% if done %}
+  <div class="notice" role="status"><b>Sent Rs {{ done.amount | inr }} to {{ users[done.to_user].name }}.</b> Reference {{ done.id }}. {% if done.backed_up %}Saved in the database and copied to the backup vault.{% else %}Saved in the database; the backup copy will follow.{% endif %}</div>
+  {% endif %}
+  {% if error %}<div class="notice bad" role="alert">{{ error }}</div>{% endif %}
+</form>
+{% endblock %}

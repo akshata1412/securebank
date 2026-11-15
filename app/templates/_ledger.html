@@ -1,0 +1,20 @@
+{% macro ledger(entries, users, me) -%}
+<table class="ledger">
+  <thead><tr><th>Date</th><th>Particulars</th><th class="r hide-sm">Withdrawal (Rs)</th><th class="r hide-sm">Deposit (Rs)</th><th class="r show-sm">Amount (Rs)</th><th class="hide-sm">DR copy</th></tr></thead>
+  <tbody>
+  {% for t in entries %}
+    {% set out = t.from_user == me %}
+    <tr>
+      <td class="when">{{ t.timestamp | ist('%d %b %Y') }}</td>
+      <td>{% if out %}To {{ users[t.to_user].name }}{% else %}From {{ users[t.from_user].name }}{% endif %}{% if t.note %}<span class="memo">{{ t.note }}</span>{% endif %}</td>
+      <td class="r num w hide-sm">{% if out %}{{ t.amount | inr }}{% endif %}</td>
+      <td class="r num d hide-sm">{% if not out %}{{ t.amount | inr }}{% endif %}</td>
+      <td class="r num show-sm {{ 'w' if out else 'd' }}">{{ '-' if out else '+' }}{{ t.amount | inr }}</td>
+      <td class="hide-sm copy">{% if t.backed_up %}<span class="seal"></span>Saved{% else %}<span class="seal pending"></span>Pending{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="ledger-empty">No entries yet. Your first transfer will appear here.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{%- endmacro %}

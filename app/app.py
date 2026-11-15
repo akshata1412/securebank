@@ -146,6 +146,10 @@ def do_transfer(from_user, to_user, amount, note):
             with conn.cursor() as c:
                 c.execute("UPDATE transactions SET backed_up=TRUE WHERE id=%s", (txn_id,))
             txn['backed_up'] = True
+        try:
+            recovery.export_customers(db)  # balances for the standby region
+        except Exception as e:
+            print(f"customer snapshot error: {e}")
         return txn, None
     except Exception:
         conn.rollback()

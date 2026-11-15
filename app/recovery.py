@@ -11,6 +11,8 @@ Run inside the app container:
     python recovery.py simulate-loss --yes
     python recovery.py backfill
     python recovery.py event <info|alert|ok> "text" [seconds]
+    python recovery.py export-customers   # primary: snapshot customer balances to S3
+    python recovery.py sync               # standby: build/refresh the database from the DR bucket
 """
 import os
 import sys
@@ -27,6 +29,7 @@ S3_BUCKET = os.environ.get('S3_BUCKET', 'securebank-backups-akshata-2026')
 DR_BUCKET = os.environ.get('DR_BUCKET', 'securebank-dr-backup-akshata-2026')
 TXN_PREFIX = 'transactions/'
 EVENT_PREFIX = 'dr-events/'
+CUSTOMERS_KEY = 'customers/latest.json'
 
 _s3 = boto3.client('s3', region_name=AWS_REGION,
                    config=Config(connect_timeout=2, read_timeout=4, retries={'max_attempts': 2}))
@@ -149,7 +152,7 @@ def status(db_connect):
     return report
 
 
-def restore(db_connect):
+def restore(db_connect, log=True):
     """Insert every transaction that exists in the DR bucket but not in the database."""
     t0 = time.time()
     dr = dr_records()
@@ -172,7 +175,7 @@ def restore(db_connect):
     finally:
         conn.close()
     took = time.time() - t0
-    if missing:
+    if missing and log:
         log_event('ok', f"Ledger rebuilt from the DR bucket: {len(missing)} transactions restored", took)
     return len(missing), took
 
@@ -199,6 +202,53 @@ def backfill():
     return copied
 
 
+SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS users (
+         username VARCHAR(50) PRIMARY KEY, password VARCHAR(100) NOT NULL, name VARCHAR(100) NOT NULL,
+         account VARCHAR(20) NOT NULL, balance INT NOT NULL DEFAULT 0,
+         created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP)""",
+    """CREATE TABLE IF NOT EXISTS transactions (
+         id VARCHAR(20) PRIMARY KEY, from_user VARCHAR(50) NOT NULL, to_user VARCHAR(50) NOT NULL,
+         from_account VARCHAR(20) NOT NULL, to_account VARCHAR(20) NOT NULL, amount INT NOT NULL,
+         note VARCHAR(200), timestamp TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP, backed_up TINYINT(1) DEFAULT 0,
+         FOREIGN KEY (from_user) REFERENCES users(username), FOREIGN KEY (to_user) REFERENCES users(username))""",
+]
+
+
+def export_customers(db_connect):
+    """Primary site: snapshot every customer's balance to S3 (replicated/pulled with the transactions)."""
+    conn = db_connect()
+    try:
+        with conn.cursor() as c:
+            c.execute("SELECT username, password, name, account, balance FROM users")
+            rows = c.fetchall()
+    finally:
+        conn.close()
+    body = {'exported_at': datetime.now(timezone.utc).isoformat(), 'customers': rows}
+    _s3.put_object(Bucket=S3_BUCKET, Key=CUSTOMERS_KEY, Body=json.dumps(body, default=str),
+                   ContentType='application/json')
+    return len(rows)
+
+
+def sync(db_connect):
+    """Standby site: create the tables if needed, load customer balances, then add missing transactions."""
+    conn = db_connect()
+    try:
+        with conn.cursor() as c:
+            for ddl in SCHEMA:
+                c.execute(ddl)
+            snap = json.loads(_s3.get_object(Bucket=DR_BUCKET, Key=CUSTOMERS_KEY)['Body'].read())
+            for u in snap['customers']:
+                c.execute("""INSERT INTO users (username, password, name, account, balance) VALUES (%s, %s, %s, %s, %s)
+                             ON DUPLICATE KEY UPDATE password=VALUES(password), name=VALUES(name),
+                             account=VALUES(account), balance=VALUES(balance)""",
+                          (u['username'], u['password'], u['name'], u['account'], int(u['balance'])))
+    finally:
+        conn.close()
+    n, took = restore(db_connect, log=False)
+    return len(snap['customers']), n, snap['exported_at']
+
+
 def _main(argv):
     import app  # the app module holds the database connection settings
     cmd = argv[1] if len(argv) > 1 else 'status'
@@ -215,6 +265,11 @@ def _main(argv):
         print(f"deleted {simulate_loss(app.db)} transactions from RDS")
     elif cmd == 'backfill':
         print(f"copied {backfill()} older backups into the DR bucket")
+    elif cmd == 'export-customers':
+        print(f"exported {export_customers(app.db)} customers to s3://{S3_BUCKET}/{CUSTOMERS_KEY}")
+    elif cmd == 'sync':
+        customers, added, at = sync(app.db)
+        print(f"standby synced: {customers} customers (snapshot {at}), {added} new transactions")
     elif cmd == 'event':
         print(log_event(argv[2], argv[3], float(argv[4]) if len(argv) > 4 else None))
     else:

@@ -99,14 +99,22 @@ outage)
   for i in $(seq 1 40); do
     A=$(dns_answer); T=$(( $(date +%s) - T0 ))
     printf '%3ds  servers healthy: %s of 2   Route 53 checkers OK: %-2s  DNS answer: %s\n' $T "$(healthy_count)" "$(r53_ok)" "$A"
-    if echo "$A" | grep -q s3-website; then
-      echo; echo "Route 53 failed over to the S3 status page after $T s."
-      event alert "Route 53 failed over to the S3 status page" $T
+    if ! echo "$A" | grep -q elb.amazonaws; then
+      if echo "$A" | grep -q ap-south-1; then WHERE="the Mumbai standby (second AWS account)"; else WHERE="the S3 status page"; fi
+      echo; echo "Route 53 failed over to $WHERE after $T s."
+      event alert "Route 53 failed over to $WHERE" $T
+      if [ -n "$MUMDNS" ]; then
+        echo; echo "== Customers keep banking in Mumbai =="
+        curl -s -m 8 http://$MUMDNS/health; echo
+        J=$(mktemp); curl -s -c $J -b $J -o /dev/null -d 'username=akshata&password=demo123' http://$MUMDNS/
+        curl -s -c $J -b $J http://$MUMDNS/dashboard | grep -o 'Rs</small>[0-9,]*' | sed 's#</small># #' | head -1 | sed 's/^/akshata balance in Mumbai: /'
+        rm -f $J
+      fi
       break
     fi
     sleep 5
   done
-  echo "Customers now see: http://securebank-site-akshata-2026.s3-website-ap-southeast-2.amazonaws.com" ;;
+  [ -n "$MUMDNS" ] && echo "Customers now use: http://$MUMDNS" || echo "Customers now see: http://securebank-site-akshata-2026.s3-website-ap-southeast-2.amazonaws.com" ;;
 recover-site)
   START=$(cat ~/.sb_outage_start 2>/dev/null || date +%s); T0=$(date +%s)
   echo "== Recovery: starting both web servers =="

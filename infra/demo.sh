@@ -104,8 +104,8 @@ outage)
   for i in $(seq 1 40); do
     A=$(dns_answer); T=$(( $(date +%s) - T0 ))
     printf '%3ds  servers healthy: %s of 2   Route 53 checkers OK: %-2s  DNS answer: %s\n' $T "$(healthy_count)" "$(r53_ok)" "$A"
-    if ! echo "$A" | grep -q elb.amazonaws; then
-      if echo "$A" | grep -q ap-south-1; then WHERE="the Mumbai standby (second AWS account)"; else WHERE="the S3 status page"; fi
+    if ! echo "$A" | grep -q ap-southeast-2; then
+      if echo "$A" | grep -qE 'mumbai|ap-south-1'; then WHERE="the Mumbai standby (second AWS account)"; else WHERE="the S3 status page"; fi
       echo; echo "Route 53 failed over to $WHERE after $T s."
       event alert "Route 53 failed over to $WHERE" $T
       if [ -n "$MUMDNS" ]; then
@@ -130,7 +130,7 @@ recover-site)
   for i in $(seq 1 60); do
     A=$(dns_answer); H=$(healthy_count); T=$(( $(date +%s) - T0 ))
     printf '%3ds  servers healthy: %s of 2   DNS answer: %s\n' $T "$H" "$A"
-    [ "$H" = 2 ] && echo "$A" | grep -q elb.amazonaws && break
+    [ "$H" = 2 ] && echo "$A" | grep -q ap-southeast-2 && break
     sleep 5
   done
   RTO=$(( $(date +%s) - T0 )); DOWN=$(( $(date +%s) - START ))

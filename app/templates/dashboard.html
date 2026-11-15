@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% from '_ledger.html' import ledger %}
+{% block title %}Your account · SecureBank{% endblock %}
+{% block main %}
+<h1>{{ greeting }}, {{ user.name.split(' ')[0] }}</h1>
+<div class="passbook">
+  <section class="cover" aria-label="Account summary">
+    <div><div class="holder">{{ user.name }}</div><div class="acct">Savings account {{ user.account }}</div></div>
+    <div><div class="bal-label">Available balance</div><div class="bal"><small>Rs</small>{{ user.balance | inr }}</div></div>
+    {% if entries %}{% set t = entries[0] %}<div class="last">Last entry <b>{{ t.timestamp | ist('%d %b, %I:%M %p') }}</b>, {% if t.from_user == user.username %}Rs {{ t.amount | inr }} to {{ users[t.to_user].name.split(' ')[0] }}{% else %}Rs {{ t.amount | inr }} from {{ users[t.from_user].name.split(' ')[0] }}{% endif %}</div>{% endif %}
+    <div class="branch">Held in Amazon RDS, copied to the DR vault after every transfer</div>
+  </section>
+  <section class="pages">
+    <div class="pages-head"><h2>Recent entries</h2><a href="{{ url_for('history') }}">Open passbook</a></div>
+    {{ ledger(entries, users, user.username) }}
+  </section>
+</div>
+<div class="quick">
+  <a href="{{ url_for('transfer') }}"><h3>Send money</h3><p>Pay another SecureBank account instantly.</p></a>
+  <a href="{{ url_for('infra_page') }}"><h3>See what's serving you</h3><p>The servers, database and backups behind this page, live.</p></a>
+  <a href="{{ url_for('dr_page') }}"><h3>Disaster recovery room</h3><p>Check that every transaction has a safe copy.</p></a>
+</div>
+{% endblock %}

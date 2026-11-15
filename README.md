@@ -105,16 +105,25 @@ kubectl apply -f k8s/securebank.yaml
 bash infra/deploy.sh        # pulls ghcr.io/akshata1412/securebank:latest onto both EC2 servers and k3s
 ```
 
-**Live failure demos (CloudShell)**
+**Disaster recovery demos (CloudShell, with the app's `/dr` page open beside it)**
 ```bash
-bash infra/demo.sh lb       # stop web-1: the load balancer keeps the app up through web-2
-bash infra/demo.sh restore  # start web-1 again
-bash infra/demo.sh pod      # delete a Kubernetes pod: it is recreated automatically
-bash infra/demo.sh dr       # make a transfer: watch its backup replicate to the DR bucket
+bash infra/06-dr-setup.sh       # one time: backfill the DR vault, 10-second Route 53 health check, S3 status page
+
+bash infra/demo.sh lb           # one server dies: the load balancer keeps the app up through the other
+bash infra/demo.sh restore      # bring it back
+bash infra/demo.sh pod          # a Kubernetes pod dies: it is recreated automatically
+bash infra/demo.sh dr           # a transfer is backed up and replicated to the DR bucket
+bash infra/demo.sh wipe         # disaster: the transaction ledger is wiped from RDS
+bash infra/demo.sh recover      # the ledger is rebuilt from the DR bucket
+bash infra/demo.sh outage       # disaster: both servers die, Route 53 fails over to the S3 status page
+bash infra/demo.sh recover-site # servers come back, DNS returns to the load balancer, RTO is measured
 ```
 
-The app's **`/infra`** page shows, live, which server or pod served the request, load balancer target health,
-RDS status, the latest S3 backup and its DR replication, the Route 53 health check, and CloudTrail status.
+The app's **`/dr`** page (Disaster recovery room) compares RDS with the DR bucket on every refresh, shows the
+recovery point (replication lag) and the recovery time measured in the last drill, and lists every drill event.
+During a full outage it stays reachable through the Kubernetes copy of the app (NodePort 30081).
+The **`/infra`** page shows which server or pod served the request, load balancer and Route 53 health,
+the database, backups and CloudTrail, all read live from AWS.
 
 **Turn the AWS demo on/off (CloudShell)**
 ```bash

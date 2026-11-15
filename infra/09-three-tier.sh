@@ -130,7 +130,7 @@ ilb)
   L=$(aws elbv2 describe-listeners --load-balancer-arn $ILB --query 'Listeners[0].ListenerArn' --output text 2>/dev/null || true)
   if [ -z "$L" ] || [ "$L" = None ]; then
     L=$(aws elbv2 create-listener --load-balancer-arn $ILB --protocol HTTP --port 80 \
-        --default-actions 'Type=fixed-response,FixedResponseConfig={StatusCode=404,ContentType=application/json,MessageBody={"error":"no such service"}}' \
+        --default-actions '[{"Type":"fixed-response","FixedResponseConfig":{"StatusCode":"404","ContentType":"text/plain","MessageBody":"no such service"}}]' \
         --query 'Listeners[0].ListenerArn' --output text)
     rule(){ aws elbv2 create-rule --listener-arn $L --priority $1 --conditions "Field=path-pattern,Values=/$2,/$2/*" \
             --actions Type=forward,TargetGroupArn=$3 >/dev/null; echo "  /$2 -> $(basename $(dirname $3))"; }

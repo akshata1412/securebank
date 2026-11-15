@@ -146,10 +146,6 @@ def do_transfer(from_user, to_user, amount, note):
             with conn.cursor() as c:
                 c.execute("UPDATE transactions SET backed_up=TRUE WHERE id=%s", (txn_id,))
             txn['backed_up'] = True
-        try:
-            recovery.export_customers(db)  # balances for the standby region
-        except Exception as e:
-            print(f"customer snapshot error: {e}")
         return txn, None
     except Exception:
         conn.rollback()
@@ -276,6 +272,15 @@ def dr_page():
 @app.route('/dr.json')
 def dr_json():
     return jsonify(recovery.status(db))
+
+
+@app.route('/replication.json')
+def replication():
+    """Feed the standby region pulls every few seconds. Needs the shared token."""
+    token = os.environ.get('REPL_TOKEN', '')
+    if not token or request.headers.get('X-Replication-Token') != token:
+        return jsonify({'error': 'forbidden'}), 403
+    return app.response_class(json.dumps(recovery.replication_feed(db), default=str), mimetype='application/json')
 
 
 @app.route('/health')

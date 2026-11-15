@@ -124,3 +124,53 @@ def test_dr_page_survives_without_aws():
     r = client().get("/dr")
     assert r.status_code == 200
     assert b"database can" in r.data
+
+
+def test_replication_feed_needs_token(monkeypatch):
+    monkeypatch.setenv("REPL_TOKEN", "s3cret")
+    monkeypatch.setattr(securebank.recovery, "replication_feed",
+                        lambda db: {"exported_at": "now", "customers": [], "transactions": []})
+    c = client()
+    assert c.get("/replication.json").status_code == 403
+    assert c.get("/replication.json", headers={"X-Replication-Token": "wrong"}).status_code == 403
+    r = c.get("/replication.json", headers={"X-Replication-Token": "s3cret"})
+    assert r.status_code == 200 and r.get_json()["customers"] == []
+
+
+def test_replication_feed_off_without_token(monkeypatch):
+    monkeypatch.delenv("REPL_TOKEN", raising=False)
+    assert client().get("/replication.json", headers={"X-Replication-Token": ""}).status_code == 403
+
+
+def test_standby_applies_feed():
+    class Cur:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql, args=None):
+            self.sql.append(sql)
+            return 1 if "INSERT IGNORE" in sql else 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    cur = Cur()
+
+    class Conn:
+        def cursor(self):
+            return cur
+
+        def close(self):
+            pass
+
+    feed = {"exported_at": "now",
+            "customers": [{"username": "akshata", "password": "x", "name": "A", "account": "ACC1001",
+                           "balance": 100}],
+            "transactions": [{"id": "TXN1001", "from_user": "akshata", "to_user": "rahul", "amount": 5,
+                              "timestamp": "2026-11-15 10:30:00"}]}
+    customers, added = securebank.recovery.apply_feed(lambda: Conn(), feed)
+    assert (customers, added) == (1, 1)
+    assert any("CREATE TABLE IF NOT EXISTS users" in s for s in cur.sql)

@@ -23,6 +23,8 @@ aws elbv2 modify-target-group --target-group-arn $TG --health-check-interval-sec
 aws elbv2 modify-target-group-attributes --target-group-arn $TG --attributes Key=deregistration_delay.timeout_seconds,Value=5 >/dev/null
 
 [ -f ~/.sb_secret_key ] || openssl rand -hex 24 > ~/.sb_secret_key
+# Shared token for the replication feed the Mumbai standby pulls (give the same value to the standby)
+[ -f ~/.sb_repl_token ] || openssl rand -hex 24 > ~/.sb_repl_token
 rm -f ~/dkey ~/dkey.pub; ssh-keygen -t ed25519 -N '' -f ~/dkey -q
 SSHO="-i $HOME/dkey -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 push_key(){ aws ec2-instance-connect send-ssh-public-key --instance-id $1 --instance-os-user ec2-user --ssh-public-key file://~/dkey.pub >/dev/null; }
@@ -41,7 +43,7 @@ for I in $WEB1 $WEB2; do
     sudo docker rm -f securebank-app >/dev/null 2>&1 || true
     sudo docker run -d --name securebank-app --restart always -p 80:80 \
       -e DB_HOST=securebank-db.cdiauaewk6q6.ap-southeast-2.rds.amazonaws.com -e DB_USER=admin -e DB_PASSWORD=\"\$DBPW\" \
-      -e SECRET_KEY=$(cat ~/.sb_secret_key) -e SERVER_ID=\"\$IID (\$AZ)\" \
+      -e SECRET_KEY=$(cat ~/.sb_secret_key) -e REPL_TOKEN=$(cat ~/.sb_repl_token) -e SERVER_ID=\"\$IID (\$AZ)\" \
       -e TARGET_GROUP_ARN=$TG -e HEALTH_CHECK_ID=$HC $IMG >/dev/null
     echo running \$(sudo docker inspect -f '{{.Config.Image}}' securebank-app) on \$IID"
 done

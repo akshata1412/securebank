@@ -17,7 +17,7 @@ Users log in, check their balance, transfer money and view their history. Data l
                          ▼                              ▼
               Application Load Balancer        Warm standby EC2, ap-south-1
                  (securebank-alb)              (second AWS account: SecureBank +
-                                                MariaDB, refreshed every 30 s)
+                                                MariaDB, refreshed every 15 s)
                   │              │
    ┌──────────────┼──────────────┼─────────────── securebank-vpc 10.0.0.0/16 ──┐
    │  public-a (2a)│   public-b (2b)│                                            │
@@ -31,20 +31,21 @@ Users log in, check their balance, transfer money and view their history. Data l
            RDS MySQL (securebank-db) ──► automated backups + snapshots
                    │
      app writes each transaction ──► S3 securebank-backups (versioned, SSE)
-                                         ├─ replication ─► S3 securebank-dr-backup (Sydney)
-                                         └─ pulled every 30 s ─► S3 securebank-dr-mumbai (Mumbai)
-                                                                  └─► standby database in Mumbai
+                                         └─ replication ─► S3 securebank-dr-backup (Sydney)
+
+  Mumbai standby ── pulls /replication.json every 15 s ──► MariaDB on the standby + S3 securebank-dr-mumbai
 
   Security & ops: IAM roles + least-privilege users + MFA · CloudTrail (KMS-encrypted logs)
                   CloudWatch alarm + dashboard · SNS email alerts · AWS Budgets
   DevOps:         GitHub Actions → lint + tests + Docker build → image to GHCR
 ```
 
-> **Two regions:** the main AWS account's free plan only allows Sydney, so the second region runs in a
-> second AWS account in Mumbai (ap-south-1). A bucket policy on the Sydney backup bucket lets the Mumbai
-> account read it; the Mumbai standby pulls new transactions and customer balances every 30 seconds and
-> rebuilds its own database from them. If the whole Sydney region goes down, Route 53 sends customers to
-> Mumbai, which keeps serving the last copy it pulled.
+> **Two regions:** the main AWS account only allows Sydney and its organization blocks other accounts from
+> reading its buckets, so the second region runs in a second AWS account in Mumbai (ap-south-1) and
+> replicates at the application level. Every 15 seconds the Mumbai standby pulls a token-protected feed
+> (`/replication.json`: customer balances and transactions) from the Sydney load balancer, rebuilds its own
+> MariaDB database and keeps the last copy in its own S3 bucket. If the whole Sydney region goes down,
+> Route 53 sends customers to Mumbai, which keeps serving the last copy it pulled (recovery point ≤ 15 s).
 
 ---
 
@@ -134,8 +135,8 @@ the database, backups and CloudTrail, all read live from AWS.
 
 **Second region (Mumbai standby)**
 ```bash
-# In the second account: launch an EC2 (Amazon Linux 2023, t3.micro) with infra/07-mumbai-standby-userdata.sh
-# as user data and an instance role with S3 access. Then, in the Sydney account's CloudShell:
+# In the second account: launch an EC2 (Amazon Linux 2023, t2.micro) with infra/07-mumbai-standby-userdata.sh
+# as user data (fill in the Sydney load balancer DNS and ~/.sb_repl_token) and an instance role with S3 access. Then, in the Sydney account's CloudShell:
 bash infra/08-route53-mumbai.sh <mumbai-public-dns>   # make Mumbai the Route 53 failover target
 ```
 

@@ -21,8 +21,8 @@ key(){ [ -f ~/dkey ] || ssh-keygen -t ed25519 -N '' -f ~/dkey -q; aws ec2-instan
 on(){ I=$1; shift; key $I; ssh -i ~/dkey -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@$(ip_of $I) "$@"; }
 k(){ on $K8SM "$@"; }
 app_exec(){ on $WEB2 "sudo docker exec securebank-app python recovery.py $*"; }
-event(){ # level text [seconds]: append to the DR timeline shown on the /dr page
-  S=""; [ -n "$3" ] && S=",\"seconds\":$3"
+event(){ # level text [seconds] [kind]: append to the DR timeline shown on the /dr page
+  S=""; [ -n "$3" ] && S=",\"seconds\":$3"; [ -n "$4" ] && S="$S,\"kind\":\"$4\""
   echo "{\"time\":\"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\",\"level\":\"$1\",\"text\":\"$2\"$S}" | \
     aws s3 cp - s3://$B/dr-events/$(date -u +%Y%m%d-%H%M%S)-$RANDOM.json --content-type application/json --only-show-errors; }
 k8s_url(){ echo "http://$(ip_of $K8SM):30081/dr"; }
@@ -67,13 +67,16 @@ dr)
   KEY=$(aws s3api list-objects-v2 --bucket $B --prefix transactions/live/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
   echo "== New transaction backup: $KEY =="
   aws s3 cp s3://$B/$KEY - | head -12; echo
-  T0=$(date +%s)
-  for i in $(seq 1 12); do
+  WRITTEN=$(date -d "$(aws s3api head-object --bucket $B --key $KEY --query LastModified --output text)" +%s)
+  for i in $(seq 1 30); do
     ST=$(aws s3api head-object --bucket $B --key $KEY --query ReplicationStatus --output text 2>/dev/null)
     aws s3api head-object --bucket $DR --key $KEY >/dev/null 2>&1 && IN=yes || IN=no
-    printf '%3ds  source replication status: %-9s  copy in DR bucket: %s\n' $(( $(date +%s) - T0 )) "$ST" "$IN"
-    [ "$IN" = yes ] && break; sleep 5
-  done ;;
+    LAG=$(( $(date +%s) - WRITTEN ))
+    printf '%3ds  source replication status: %-9s  copy in DR bucket: %s\n' $LAG "$ST" "$IN"
+    [ "$IN" = yes ] && break; sleep 2
+  done
+  echo; echo "The transfer reached the DR bucket $LAG s after it was written."
+  event info "Replication drill: a new transfer reached the DR bucket" $LAG rpo ;;
 wipe)
   echo "== Before =="; app_exec status
   echo; echo "== DISASTER: deleting every transaction from the RDS database =="

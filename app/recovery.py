@@ -72,12 +72,14 @@ def db_ids(db_connect):
         conn.close()
 
 
-def log_event(level, text, seconds=None):
+def log_event(level, text, seconds=None, kind=None):
     """Append an event to the DR timeline (stored in S3, so it survives a database failure)."""
     now = datetime.now(timezone.utc)
     event = {'time': now.isoformat(), 'level': level, 'text': text}
     if seconds is not None:
         event['seconds'] = round(float(seconds), 1)
+    if kind:
+        event['kind'] = kind
     key = f"{EVENT_PREFIX}{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.json"
     _s3.put_object(Bucket=S3_BUCKET, Key=key, Body=json.dumps(event), ContentType='application/json')
     return event
@@ -96,19 +98,23 @@ def events(limit=12):
     return out
 
 
-def recovery_point():
-    """Seconds between the newest backup landing in S3 and its copy landing in the DR bucket."""
+def recovery_point(evts):
+    """How far the DR vault trails a new transfer.
+
+    S3 gives a replica the same timestamp as the original, so the lag can't be read from object dates.
+    While the newest backup is still copying we show how long it has waited; otherwise we show the
+    lag measured by the last replication drill (an event with kind 'rpo').
+    """
     live = _list(S3_BUCKET, TXN_PREFIX + 'live/')
-    if not live:
-        return None
-    newest = max(live, key=lambda o: o['LastModified'])
-    try:
-        copy = _s3.head_object(Bucket=DR_BUCKET, Key=newest['Key'])
-        return {'seconds': (copy['LastModified'] - newest['LastModified']).total_seconds(), 'pending': False,
-                'at': newest['LastModified']}
-    except Exception:
-        waited = (datetime.now(timezone.utc) - newest['LastModified']).total_seconds()
-        return {'seconds': waited, 'pending': True, 'at': newest['LastModified']}
+    if live:
+        newest = max(live, key=lambda o: o['LastModified'])
+        try:
+            _s3.head_object(Bucket=DR_BUCKET, Key=newest['Key'])
+        except Exception:
+            waited = (datetime.now(timezone.utc) - newest['LastModified']).total_seconds()
+            return {'seconds': waited, 'pending': True}
+    measured = next((e for e in evts if e.get('kind') == 'rpo' and e.get('seconds') is not None), None)
+    return {'seconds': measured['seconds'], 'pending': False, 'at': measured['time']} if measured else None
 
 
 def status(db_connect):
@@ -126,14 +132,14 @@ def status(db_connect):
     report['missing'] = sorted(set(dr) - ids) if report['db_ok'] else []
     report['not_in_dr'] = sorted(ids - set(dr)) if report['dr_ok'] else []
     try:
-        report['rpo'] = recovery_point()
-    except Exception:
-        report['rpo'] = None
-    try:
         report['events'] = events()
     except Exception:
         report['events'] = []
-    report['rto'] = next((e for e in report['events'] if e.get('seconds') is not None), None)
+    try:
+        report['rpo'] = recovery_point(report['events'])
+    except Exception:
+        report['rpo'] = None
+    report['rto'] = next((e for e in report['events'] if e.get('seconds') is not None and e.get('kind') != 'rpo'), None)
     if not report['db_ok']:
         report['state'] = 'down'
     elif report['missing']:

@@ -12,13 +12,14 @@ Run inside the app container:
     python recovery.py backfill
     python recovery.py event <info|alert|ok> "text" [seconds]
     python recovery.py export-customers   # primary: snapshot customer balances to S3
-    python recovery.py sync               # standby: build/refresh the database from the DR bucket
+    python recovery.py sync               # standby: build/refresh the database from the primary region
 """
 import os
 import sys
 import json
 import time
 import uuid
+import urllib.request
 from datetime import datetime, timezone
 
 import boto3
@@ -30,6 +31,10 @@ DR_BUCKET = os.environ.get('DR_BUCKET', 'securebank-dr-backup-akshata-2026')
 TXN_PREFIX = 'transactions/'
 EVENT_PREFIX = 'dr-events/'
 CUSTOMERS_KEY = 'customers/latest.json'
+FEED_KEY = 'replica/feed.json'
+# Standby only: where to pull the primary region's replication feed from, and the shared token
+REPL_SOURCE = os.environ.get('REPL_SOURCE', '')
+REPL_TOKEN = os.environ.get('REPL_TOKEN', '')
 
 _s3 = boto3.client('s3', region_name=AWS_REGION,
                    config=Config(connect_timeout=2, read_timeout=4, retries={'max_attempts': 2}))
@@ -230,23 +235,68 @@ def export_customers(db_connect):
     return len(rows)
 
 
-def sync(db_connect):
-    """Standby site: create the tables if needed, load customer balances, then add missing transactions."""
+def replication_feed(db_connect):
+    """Primary site: every customer balance and every transaction, for the standby region to pull."""
+    conn = db_connect()
+    try:
+        with conn.cursor() as c:
+            c.execute("SELECT username, password, name, account, balance FROM users")
+            customers = c.fetchall()
+            c.execute("""SELECT id, from_user, to_user, from_account, to_account, amount, note, timestamp
+                         FROM transactions ORDER BY id""")
+            transactions = c.fetchall()
+    finally:
+        conn.close()
+    return {'exported_at': datetime.now(timezone.utc).isoformat(), 'customers': customers,
+            'transactions': transactions}
+
+
+def fetch_feed():
+    """Standby site: pull the feed from the primary region; fall back to the last copy kept in S3."""
+    if REPL_SOURCE:
+        try:
+            req = urllib.request.Request(REPL_SOURCE, headers={'X-Replication-Token': REPL_TOKEN})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                feed = json.loads(r.read())
+            _s3.put_object(Bucket=S3_BUCKET, Key=FEED_KEY, Body=json.dumps(feed, default=str),
+                           ContentType='application/json')
+            return feed, 'primary'
+        except Exception as e:
+            print(f"primary unreachable ({str(e)[:80]}), using the last copy")
+    feed = json.loads(_s3.get_object(Bucket=S3_BUCKET, Key=FEED_KEY)['Body'].read())
+    return feed, 'last copy'
+
+
+def apply_feed(db_connect, feed):
+    """Create the tables if needed, load customer balances, and add transactions the standby lacks."""
     conn = db_connect()
     try:
         with conn.cursor() as c:
             for ddl in SCHEMA:
                 c.execute(ddl)
-            snap = json.loads(_s3.get_object(Bucket=DR_BUCKET, Key=CUSTOMERS_KEY)['Body'].read())
-            for u in snap['customers']:
+            for u in feed['customers']:
                 c.execute("""INSERT INTO users (username, password, name, account, balance) VALUES (%s, %s, %s, %s, %s)
                              ON DUPLICATE KEY UPDATE password=VALUES(password), name=VALUES(name),
                              account=VALUES(account), balance=VALUES(balance)""",
                           (u['username'], u['password'], u['name'], u['account'], int(u['balance'])))
+            added = 0
+            for t in feed.get('transactions', []):
+                added += c.execute("""INSERT IGNORE INTO transactions
+                             (id, from_user, to_user, from_account, to_account, amount, note, timestamp, backed_up)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)""",
+                                   (t['id'], t['from_user'], t['to_user'], t.get('from_account') or '',
+                                    t.get('to_account') or '', int(t['amount']), t.get('note') or '',
+                                    str(t.get('timestamp') or '')[:19] or None))
     finally:
         conn.close()
-    n, took = restore(db_connect, log=False)
-    return len(snap['customers']), n, snap['exported_at']
+    return len(feed['customers']), added
+
+
+def sync(db_connect):
+    """Standby site: refresh the local database from the primary region (or its last copy)."""
+    feed, source = fetch_feed()
+    customers, added = apply_feed(db_connect, feed)
+    return customers, added, feed['exported_at'], source
 
 
 def _main(argv):
@@ -268,8 +318,8 @@ def _main(argv):
     elif cmd == 'export-customers':
         print(f"exported {export_customers(app.db)} customers to s3://{S3_BUCKET}/{CUSTOMERS_KEY}")
     elif cmd == 'sync':
-        customers, added, at = sync(app.db)
-        print(f"standby synced: {customers} customers (snapshot {at}), {added} new transactions")
+        customers, added, at, source = sync(app.db)
+        print(f"standby synced from {source}: {customers} customers (as of {at}), {added} new transactions")
     elif cmd == 'event':
         print(log_event(argv[2], argv[3], float(argv[4]) if len(argv) > 4 else None))
     else:

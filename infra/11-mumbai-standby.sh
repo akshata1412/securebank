@@ -127,7 +127,7 @@ for s in users accounts passbook; do
 done
 docker pull -q $GH/securebank-web:latest >/dev/null; docker rm -f web securebank-app >/dev/null 2>&1 || true
 docker run -d --name web --restart always -p 80:80 -e API_URL=http://$MILBDNS -e INTERNAL_TOKEN=$TOKEN -e SECRET_KEY=$WEBKEY \
-  -e AWS_REGION=ap-south-1 -e SERVER_ID="mumbai \$NAME" -e GUNICORN_CMD_ARGS="--workers 1" $GH/securebank-web:latest >/dev/null
+  -e AWS_REGION=ap-south-1 -e TARGET_GROUP_ARN=$TW -e S3_BUCKET=securebank-dr-mumbai-akshata-2026 -e DR_BUCKET=securebank-dr-mumbai-akshata-2026 -e SERVER_ID="mumbai \$NAME" -e GUNICORN_CMD_ARGS="--workers 1" $GH/securebank-web:latest >/dev/null
 echo "apps running, database at \$DBH"
 APPS
   chmod +x /usr/local/bin/sb-mumbai-apps; /usr/local/bin/sb-mumbai-apps $MYIP

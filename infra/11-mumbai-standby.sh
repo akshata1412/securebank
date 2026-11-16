@@ -58,7 +58,8 @@ replica)
   echo "== Start replicating, then lock the replica read-only =="
   q "CREATE USER IF NOT EXISTS 'app'@'%' IDENTIFIED BY '$APPPW'; GRANT SELECT, INSERT, UPDATE, DELETE ON securebank.* TO 'app'@'%';"
   q "CHANGE REPLICATION SOURCE TO SOURCE_HOST='$RELAY', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='$RPW',
-     SOURCE_LOG_FILE='$FILE', SOURCE_LOG_POS=$OFF, SOURCE_SSL=1, GET_SOURCE_PUBLIC_KEY=1; START REPLICA;
+     SOURCE_LOG_FILE='$FILE', SOURCE_LOG_POS=$OFF, SOURCE_SSL=1, GET_SOURCE_PUBLIC_KEY=1,
+     SOURCE_RETRY_COUNT=100000, SOURCE_CONNECT_RETRY=60; START REPLICA;
      SET PERSIST read_only=ON; SET PERSIST super_read_only=ON;"
   sleep 5
   docker exec replica mysql -uroot -p"$ROOTPW" -e "SHOW REPLICA STATUS\G" 2>/dev/null | grep -E 'Replica_IO_Running|Replica_SQL_Running:|Seconds_Behind_Source|Last_.*Error:' | grep -v ': $'
@@ -126,7 +127,7 @@ for s in users accounts passbook; do
 done
 docker pull -q $GH/securebank-web:latest >/dev/null; docker rm -f web securebank-app >/dev/null 2>&1 || true
 docker run -d --name web --restart always -p 80:80 -e API_URL=http://$MILBDNS -e INTERNAL_TOKEN=$TOKEN -e SECRET_KEY=$WEBKEY \
-  -e AWS_REGION=ap-south-1 -e SERVER_ID="mumbai \$NAME" -e GUNICORN_CMD_ARGS="--workers 1" $GH/securebank-web:latest >/dev/null
+  -e AWS_REGION=ap-south-1 -e TARGET_GROUP_ARN=$TW -e S3_BUCKET=securebank-dr-mumbai-akshata-2026 -e DR_BUCKET=securebank-dr-mumbai-akshata-2026 -e SERVER_ID="mumbai \$NAME" -e GUNICORN_CMD_ARGS="--workers 1" $GH/securebank-web:latest >/dev/null
 echo "apps running, database at \$DBH"
 APPS
   chmod +x /usr/local/bin/sb-mumbai-apps; /usr/local/bin/sb-mumbai-apps $MYIP
@@ -153,7 +154,10 @@ APPS
 #!/bin/bash
 source /root/sb-mumbai.env; FAILS=0
 while true; do
-  if curl -sf -m 5 "$SYDHEALTH" >/dev/null; then FAILS=0; else FAILS=$((FAILS+1)); fi
+  # A planned shutdown (sbctl.sh stop) makes Sydney's load balancer answer /maintenance: not a disaster, don't promote.
+  if curl -sf -m 5 "$SYDHEALTH" >/dev/null; then FAILS=0
+  elif curl -s -m 5 "${SYDHEALTH%/health/deep}/maintenance" | grep -q planned; then FAILS=0
+  else FAILS=$((FAILS+1)); fi
   RUNNING=$(docker exec replica mysql -uroot -p"$ROOTPW" -N -e "SELECT SERVICE_STATE FROM performance_schema.replication_connection_status" 2>/dev/null)
   if [ $FAILS -ge 6 ] && [ -n "$RUNNING" ]; then echo "$(date -u +%FT%TZ) Sydney down for 60 s: promoting"; /usr/local/bin/sb-mumbai promote; fi
   sleep 10

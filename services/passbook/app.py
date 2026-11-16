@@ -11,6 +11,11 @@ import recovery  # noqa: E402
 app = create_app('passbook-management', 'passbook')
 
 
+def _short_host(host):
+    """RDS endpoint -> its first label (securebank-db); an IP address (the Mumbai replica) stays whole."""
+    return host if host.replace('.', '').isdigit() else host.split('.')[0]
+
+
 @app.get('/passbook/<username>')
 def passbook(username):
     sql = """SELECT * FROM transactions WHERE from_user=%s OR to_user=%s ORDER BY timestamp DESC, id DESC"""
@@ -49,7 +54,7 @@ def stats():
             conn.close()
         return out({'ok': True, 'latency_ms': int((time.time() - t0) * 1000), 'users': users,
                     'transactions': row['n'], 'backed_up': int(row['b'] or 0), 'last': row['last'],
-                    'version': version, 'host': os.environ.get('DB_HOST', '').split('.')[0]})
+                    'version': version, 'host': _short_host(os.environ.get('DB_HOST', ''))})
     except Exception as e:
         return out({'ok': False, 'error': str(e)[:160]})
 
